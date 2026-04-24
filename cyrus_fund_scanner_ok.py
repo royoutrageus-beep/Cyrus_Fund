@@ -481,12 +481,14 @@ def get_fase(df):
 def build_result(ticker, df_main, df_daily, mode):
     try:
         df   = add_indicators(df_main)
-        df_d = add_indicators(df_daily) if df_daily is not None else None
+        # df_daily: raw untuk gain/val, add_indicators hanya untuk trend/fase
+        df_d = df_daily
+        df_d_ind = add_indicators(df_daily) if df_daily is not None and len(df_daily) >= 10 else None
 
         sinyal, score, flags, gc_now = get_sinyal(df, mode)
         aksi = get_aksi(score, gc_now, sinyal)
-        trend, trend_col = get_trend(df_d if df_d is not None else df)
-        fase,  fase_col  = get_fase(df_d  if df_d is not None else df)
+        trend, trend_col = get_trend(df_d_ind if df_d_ind is not None else df)
+        fase,  fase_col  = get_fase(df_d_ind  if df_d_ind is not None else df)
 
         r  = df.iloc[-1]; r1 = df.iloc[-2] if len(df) > 1 else r
         cl = sf(r.get("Close",0))
@@ -500,19 +502,18 @@ def build_result(ticker, df_main, df_daily, mode):
         e9  = sf(r.get("E9",cl))
         lw  = sf(r.get("LW",0))
 
-        # GAIN — pakai daily D1 kalau ada, fallback ke 15m change
+        # GAIN & VAL — persis Theta Turbo (float direct, no sf wrapping)
         if df_d is not None and len(df_d) >= 2:
-            c1   = sf(df_d.iloc[-1]["Close"] if "Close" in df_d.columns else cl)
-            c0   = sf(df_d.iloc[-2]["Close"] if "Close" in df_d.columns else cl)
-            gain = (c1 - c0) / max(c0, 1) * 100
-            # VAL — volume harian dari D1
-            daily_vol = sf(df_d.iloc[-1]["Volume"] if "Volume" in df_d.columns else 0)
-            vb = c1 * daily_vol / 1e9
+            try:
+                c1       = float(df_d.iloc[-1]["Close"])
+                c0       = float(df_d.iloc[-2]["Close"])
+                gain     = (c1 - c0) / max(c0, 1) * 100
+                daily_vol= float(df_d.iloc[-1]["Volume"])
+                vb       = c1 * daily_vol / 1e9
+            except:
+                gain = 0.0; vb = cl * vol / 1e9
         else:
-            # Fallback sederhana: 15m last 2 candle
-            c0   = sf(r1.get("Close", cl))
-            gain = (cl - c0) / max(c0, 1) * 100
-            vb   = cl * vol / 1e9
+            gain = 0.0; vb = cl * vol / 1e9
 
         val_str = f"{vb:.1f}B" if vb >= 1 else f"{round(vb*1000,0):.0f}M"
 
@@ -617,11 +618,12 @@ def do_scan(stocks, mode, pb, status_ph, preview_ph=None, force_fresh=False):
                 if df is not None and len(df) >= 20: raw_main[t] = df
             except: pass
 
-    if mode != "Swing":
+    if True:  # Fetch daily untuk SEMUA mode — Gain & Val harus akurat
         need_ctx = [t for t in stocks]
         status_ph.markdown(
             '<div style="font-family:Space Mono,monospace;font-size:11px;color:#00e5ff">'
-            '📅 Daily context (10 threads)...</div>', unsafe_allow_html=True)
+            '📅 Daily context untuk Gain & Val (10 threads)...</div>',
+            unsafe_allow_html=True)
         def _fc(t): return t, _fetch_raw(t, "daily", force_fresh)
         done2 = [0]
         with ThreadPoolExecutor(max_workers=10) as ex:
@@ -632,7 +634,8 @@ def do_scan(stocks, mode, pb, status_ph, preview_ph=None, force_fresh=False):
                     pb.progress(0.43 + (done2[0] / max(n, 1)) * 0.35)
                 try:
                     t, df = f.result(timeout=15)
-                    if df is not None: raw_ctx[t] = df
+                    if df is not None and len(df) >= 2:
+                        raw_ctx[t] = df
                 except: pass
 
     pb.progress(0.85)
@@ -1047,33 +1050,40 @@ with tab_wl:
         st.markdown("<div style='text-align:center;padding:48px;color:#4a5568;font-family:Space Mono,monospace'><div style='font-size:28px;margin-bottom:8px'>👁️</div><div>MASUKKAN TICKER DI ATAS</div></div>",unsafe_allow_html=True)
 
 # ════════════════════════════════════════
-#  AUTO-REFRESH — JS Timer ONLY
-#  st.rerun() dihapus → bikin infinite loop di cloud!
-#  JS timer: reload browser setelah 8 menit
-#  Components import di atas (sudah ada)
+#  AUTO-REFRESH — PORT EXACT DARI THETA
+#  Aturan: timer HANYA di-set kalau elapsed < 480 (belum waktunya)
+#  Kalau elapsed >= 480 = waktunya scan ulang, bukan reload lagi
+#  Ini yang fix kedap-kedip!
 # ════════════════════════════════════════
-import streamlit.components.v1 as _components
+import streamlit.components.v1 as _cf_comp
 
 _has_results = any([st.session_state.res_momentum, st.session_state.res_intraday,
                     st.session_state.res_bsjp, st.session_state.res_swing])
 
 if is_open and _has_results and st.session_state.last_scan:
-    _elapsed_ar   = now_jkt.timestamp() - st.session_state.last_scan
-    _remaining_ms = max(10000, int((480 - _elapsed_ar) * 1000))  # min 10 detik
-    # Hanya inject kalau masih perlu refresh (belum expired)
-    if _elapsed_ar < 600:  # max 10 menit
-        _components.html(
+    _el_ar  = int(now_jkt.timestamp() - st.session_state.last_scan)
+    _rem_ar = 480 - _el_ar
+
+    # KUNCI: hanya inject timer kalau BELUM waktunya refresh
+    # Kalau elapsed >= 480 → jangan set timer → page tetap idle
+    # sampai user klik scan atau next render
+    if _el_ar < 480:
+        _rem_ms = max(10000, _rem_ar * 1000)  # min 10 detik
+        _cf_comp.html(
             f"""<script>
-            if(window._cyrus_timer) clearTimeout(window._cyrus_timer);
-            window._cyrus_timer = setTimeout(function(){{
+            if (window._cyrus_ar) clearTimeout(window._cyrus_ar);
+            window._cyrus_ar = setTimeout(function() {{
                 window.parent.location.reload();
-            }}, {_remaining_ms});
+            }}, {_rem_ms});
             </script>""",
             height=0)
+
+_m_ar = int(max(0, 480 - (now_jkt.timestamp() - st.session_state.last_scan)) // 60) if st.session_state.last_scan else 8
+_s_ar = int(max(0, 480 - (now_jkt.timestamp() - st.session_state.last_scan)) % 60)  if st.session_state.last_scan else 0
 
 st.markdown(
     f"<div style='margin-top:24px;padding-top:12px;border-top:1px solid #1c2533;"
     f"font-family:Space Mono,monospace;font-size:9px;color:#4a5568;text-align:center'>"
     f"🎯 Cyrus Fund Scanner · Full IDX {len(ALL_STOCKS)} saham · Top {DISPLAY_TOP} rotating · "
-    f"DataSectors ⚡ · Auto-refresh 8m</div>",
+    f"DataSectors ⚡ · Next refresh: {_m_ar:02d}:{_s_ar:02d}</div>",
     unsafe_allow_html=True)
