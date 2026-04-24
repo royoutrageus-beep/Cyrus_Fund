@@ -500,27 +500,19 @@ def build_result(ticker, df_main, df_daily, mode):
         e9  = sf(r.get("E9",cl))
         lw  = sf(r.get("LW",0))
 
-        # FIX 1: GAIN — pakai daily close, bukan 15m candle
-        # daily D1: bandingkan close hari ini vs close kemarin
+        # GAIN — pakai daily D1 kalau ada, fallback ke 15m change
         if df_d is not None and len(df_d) >= 2:
-            c1   = sf(df_d.iloc[-1].get("Close", cl))
-            c0   = sf(df_d.iloc[-2].get("Close", cl))
+            c1   = sf(df_d.iloc[-1]["Close"] if "Close" in df_d.columns else cl)
+            c0   = sf(df_d.iloc[-2]["Close"] if "Close" in df_d.columns else cl)
             gain = (c1 - c0) / max(c0, 1) * 100
-            # FIX 2: VAL — pakai total volume harian, bukan 1 candle 15m
-            daily_vol = sf(df_d.iloc[-1].get("Volume", 0))
+            # VAL — volume harian dari D1
+            daily_vol = sf(df_d.iloc[-1]["Volume"] if "Volume" in df_d.columns else 0)
             vb = c1 * daily_vol / 1e9
         else:
-            # Fallback: sum semua volume 15m hari ini
-            try:
-                today = df.index[-1].date()
-                df_today = df[df.index.date == today]
-                daily_vol_sum = df_today["Volume"].sum() if len(df_today) > 0 else vol
-                gain = (cl - sf(df_today.iloc[0].get("Close", cl) if len(df_today)>1 else r1.get("Close",cl))) / max(cl, 1) * 100
-            except:
-                daily_vol_sum = vol
-                c0   = sf(r1.get("Close", cl))
-                gain = (cl - c0) / max(c0, 1) * 100
-            vb = cl * daily_vol_sum / 1e9
+            # Fallback sederhana: 15m last 2 candle
+            c0   = sf(r1.get("Close", cl))
+            gain = (cl - c0) / max(c0, 1) * 100
+            vb   = cl * vol / 1e9
 
         val_str = f"{vb:.1f}B" if vb >= 1 else f"{round(vb*1000,0):.0f}M"
 
@@ -578,8 +570,8 @@ def build_result(ticker, df_main, df_daily, mode):
             "Score": score, "GC": gc_now,
             "Flags": " · ".join(flags[:3]), "ATR": round(atr,0),
         }
-    except:
-        return None
+    except Exception as _e:
+        return None  # silently skip bad tickers
 
 # ════════════════════════════════════════
 #  SCAN ENGINE — PARALLEL + LIVE PREVIEW
@@ -753,16 +745,18 @@ def _sb(s):
 
 def show_met(res):
     if not res: return
-    bd   = sum(1 for x in res if "BANDAR"  in x["Sinyal"])
-    hk   = sum(1 for x in res if "HAKA"    in x["Sinyal"])
-    sp   = sum(1 for x in res if "SUPER"   in x["Sinyal"])
-    rb   = sum(1 for x in res if "REBOUND" in x["Sinyal"])
-    beli = sum(1 for x in res if "AT ENTRY" in x["Aksi"])
-    ab   = sum(1 for x in res if "BELI" in x.get("FDir",""))
-    aj   = sum(1 for x in res if "JUAL" in x.get("FDir",""))
-    ap   = round(sum(x["Prob"] for x in res) / len(res))
-    pc   = "#00ff88" if ap >= 65 else "#ffb700" if ap >= 55 else "#ff3d5a"
-    top  = res[0]["T"]
+    try:
+        bd   = sum(1 for x in res if "BANDAR"  in x.get("Sinyal",""))
+        hk   = sum(1 for x in res if "HAKA"    in x.get("Sinyal",""))
+        sp   = sum(1 for x in res if "SUPER"   in x.get("Sinyal",""))
+        rb   = sum(1 for x in res if "REBOUND" in x.get("Sinyal",""))
+        beli = sum(1 for x in res if "AT ENTRY" in x.get("Aksi",""))
+        ab   = sum(1 for x in res if "BELI" in x.get("FDir",""))
+        aj   = sum(1 for x in res if "JUAL" in x.get("FDir",""))
+        ap   = round(sum(x.get("Prob",50) for x in res) / len(res))
+        pc   = "#00ff88" if ap >= 65 else "#ffb700" if ap >= 55 else "#ff3d5a"
+        top  = res[0].get("T","—")
+    except: return
     html = '<div style="display:flex;gap:8px;margin:10px 0;flex-wrap:wrap">'
     for lbl,val,col in [
         ("BANDAR 🔵",bd,"#4da6ff"),("HAKA 🔨",hk,"#00ff88"),
@@ -783,30 +777,32 @@ def show_tbl(res):
     if not res: return
     rows = ""
     for r in res:
-        gc = "#00ff88" if r["Gain"] > 0 else "#ff3d5a"
-        wc = "#00ff88" if r["Wick"] > 30 else "#4a5568"
-        rc = r["RSI_Col"]
-        fd = r.get("FDir","⚪")
-        fc = "#4da6ff" if "BELI" in fd else "#ff3d5a" if "JUAL" in fd else "#4a5568"
-        rows += "<tr style='font-family:Space Mono,monospace;font-size:10px'>"
-        rows += f"<td style='padding:5px 8px;font-weight:700;color:#e6edf3;border-bottom:1px solid #1c2533;white-space:nowrap'>{r['T']}</td>"
-        rows += f"<td style='padding:5px 6px;color:{gc};font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r['Gain']:+.1f}%</td>"
-        rows += f"<td style='padding:5px 6px;color:{wc};border-bottom:1px solid #1c2533;text-align:center'>{int(r['Wick'])}%</td>"
-        rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'>{_ab(r['Aksi'])}</td>"
-        rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'>{_sb(r['Sinyal'])}</td>"
-        rows += f"<td style='padding:5px 6px;color:#ff7b00;font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r['RVOL_str']}</td>"
-        rows += f"<td style='padding:5px 6px;color:#4a5568;border-bottom:1px solid #1c2533;text-align:center'>{r['Entry_str']}</td>"
-        rows += f"<td style='padding:5px 6px;color:#e6edf3;font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r['Now']:,}</td>"
-        rows += f"<td style='padding:5px 6px;background:#0d2b0d;color:#00ff88;font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r['TP']:,}</td>"
-        rows += f"<td style='padding:5px 6px;background:#2b0d0d;color:#ff3d5a;border-bottom:1px solid #1c2533;text-align:center'>{r['SL']:,}</td>"
-        rows += f"<td style='padding:5px 6px;color:#00ff88;border-bottom:1px solid #1c2533;text-align:center'>{r['Profit']:.1f}%</td>"
-        rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'><span style='color:{rc};font-weight:700'>{r['RSI_Sig']}</span></td>"
-        rows += f"<td style='padding:5px 6px;color:{rc};border-bottom:1px solid #1c2533;text-align:center'>{r['RSI5']:.0f}</td>"
-        rows += f"<td style='padding:5px 6px;color:#4a5568;font-size:9px;border-bottom:1px solid #1c2533;text-align:center'>{r['Val']}</td>"
-        rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'><span style='color:{r.get('Fase_col','#4a5568')};font-size:10px'>{r.get('Fase','')}</span></td>"
-        rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'><span style='color:{r.get('Trend_col','#4a5568')};font-weight:700;font-size:10px'>{r.get('Trend','')}</span></td>"
-        rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center;font-size:10px'><span style='color:{fc}'>{fd}</span></td>"
-        rows += "</tr>"
+        try:
+            gc = "#00ff88" if r.get("Gain",0) > 0 else "#ff3d5a"
+            wc = "#00ff88" if r.get("Wick",0) > 30 else "#4a5568"
+            rc = r.get("RSI_Col","#4a5568")
+            fd = r.get("FDir","—")
+            fc = r.get("FC","#4a5568")
+            rows += "<tr style='font-family:Space Mono,monospace;font-size:10px'>"
+            rows += f"<td style='padding:5px 8px;font-weight:700;color:#e6edf3;border-bottom:1px solid #1c2533;white-space:nowrap'>{r.get('T','?')}</td>"
+            rows += f"<td style='padding:5px 6px;color:{gc};font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r.get('Gain',0):+.1f}%</td>"
+            rows += f"<td style='padding:5px 6px;color:{wc};border-bottom:1px solid #1c2533;text-align:center'>{int(r.get('Wick',0))}%</td>"
+            rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'>{_ab(r.get('Aksi','WAIT'))}</td>"
+            rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'>{_sb(r.get('Sinyal','—'))}</td>"
+            rows += f"<td style='padding:5px 6px;color:#ff7b00;font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r.get('RVOL_str','—')}</td>"
+            rows += f"<td style='padding:5px 6px;color:#4a5568;border-bottom:1px solid #1c2533;text-align:center'>{r.get('Entry_str','—')}</td>"
+            rows += f"<td style='padding:5px 6px;color:#e6edf3;font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r.get('Now',0):,}</td>"
+            rows += f"<td style='padding:5px 6px;background:#0d2b0d;color:#00ff88;font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r.get('TP',0):,}</td>"
+            rows += f"<td style='padding:5px 6px;background:#2b0d0d;color:#ff3d5a;border-bottom:1px solid #1c2533;text-align:center'>{r.get('SL',0):,}</td>"
+            rows += f"<td style='padding:5px 6px;color:#00ff88;border-bottom:1px solid #1c2533;text-align:center'>{r.get('Profit',0):.1f}%</td>"
+            rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'><span style='color:{rc};font-weight:700'>{r.get('RSI_Sig','—')}</span></td>"
+            rows += f"<td style='padding:5px 6px;color:{rc};border-bottom:1px solid #1c2533;text-align:center'>{r.get('RSI5',0):.0f}</td>"
+            rows += f"<td style='padding:5px 6px;color:#4a5568;font-size:9px;border-bottom:1px solid #1c2533;text-align:center'>{r.get('Val','—')}</td>"
+            rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'><span style='color:{r.get('Fase_col','#4a5568')};font-size:10px'>{r.get('Fase','')}</span></td>"
+            rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'><span style='color:{r.get('Trend_col','#4a5568')};font-weight:700;font-size:10px'>{r.get('Trend','')}</span></td>"
+            rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center;font-size:10px'><span style='color:{fc}'>{fd}</span></td>"
+            rows += "</tr>"
+        except: continue
     hdrs = "".join(
         f"<th style='padding:7px 6px;color:{TC.get(h,'#4a5568')};font-family:Space Mono,monospace;font-size:9px;"
         f"letter-spacing:1px;border-bottom:2px solid #1c2533;{'text-align:left' if h=='EMITEN' else ''}'>{h}</th>"
