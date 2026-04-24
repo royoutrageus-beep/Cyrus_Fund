@@ -29,7 +29,7 @@ DISPLAY_TOP = 30
 #  Fix: @st.cache_data tidak thread-safe!
 #  Solusi: pickle di /tmp + memory dict
 # ════════════════════════════════════════
-CACHE_DIR = Path.home() / ".cyrus_cache"
+CACHE_DIR = Path("/tmp/cyrus_cache") if Path("/tmp").exists() else Path.home() / ".cyrus_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 CACHE_TTL  = 300   # 5 menit
 _mem       = {}    # {key: (timestamp, df)}
@@ -606,7 +606,7 @@ def do_scan(stocks, mode, pb, status_ph, preview_ph=None, force_fresh=False):
 
     def _fm(t): return t, _fetch_raw(t, tf, True)
     done = [0]
-    with ThreadPoolExecutor(max_workers=20) as ex:
+    with ThreadPoolExecutor(max_workers=10) as ex:
         futs = {ex.submit(_fm, t): t for t in need_main}
         for f in as_completed(futs):
             done[0] += 1
@@ -624,7 +624,7 @@ def do_scan(stocks, mode, pb, status_ph, preview_ph=None, force_fresh=False):
             '📅 Daily context (10 threads)...</div>', unsafe_allow_html=True)
         def _fc(t): return t, _fetch_raw(t, "daily", force_fresh)
         done2 = [0]
-        with ThreadPoolExecutor(max_workers=20) as ex:
+        with ThreadPoolExecutor(max_workers=10) as ex:
             futs = {ex.submit(_fc, t): t for t in need_ctx}
             for f in as_completed(futs):
                 done2[0] += 1
@@ -679,7 +679,7 @@ st.markdown(_CSS, unsafe_allow_html=True)
 #  Fix: browser reload (JS timer) reset session state.
 #  Solusi: simpan hasil scan ke disk, load otomatis saat startup.
 # ════════════════════════════════════════
-RESULTS_FILE = Path.home() / ".cyrus_cache" / "last_results.pkl"
+RESULTS_FILE = CACHE_DIR / "last_results.pkl"
 RESULTS_TTL  = 600  # 10 menit — hasil masih relevan
 
 def save_results(mode, results, scan_ts):
@@ -1047,44 +1047,33 @@ with tab_wl:
         st.markdown("<div style='text-align:center;padding:48px;color:#4a5568;font-family:Space Mono,monospace'><div style='font-size:28px;margin-bottom:8px'>👁️</div><div>MASUKKAN TICKER DI ATAS</div></div>",unsafe_allow_html=True)
 
 # ════════════════════════════════════════
-#  AUTO-REFRESH — JavaScript Timer
-#  st.rerun() gak jalan saat page idle.
-#  JS timer jalan di browser, independent dari Python.
-#  Reload page setiap 5 menit → trigger rescan otomatis.
+#  AUTO-REFRESH — JS Timer ONLY
+#  st.rerun() dihapus → bikin infinite loop di cloud!
+#  JS timer: reload browser setelah 8 menit
+#  Components import di atas (sudah ada)
 # ════════════════════════════════════════
-import streamlit.components.v1 as components
+import streamlit.components.v1 as _components
 
 _has_results = any([st.session_state.res_momentum, st.session_state.res_intraday,
                     st.session_state.res_bsjp, st.session_state.res_swing])
 
-if is_open and _has_results:
-    # Hitung sisa waktu ke next refresh
-    if st.session_state.last_scan:
-        _elapsed_ar = now_jkt.timestamp() - st.session_state.last_scan
-        _remaining_ms = max(0, int((480 - _elapsed_ar) * 1000))
-    else:
-        _remaining_ms = 300000  # 5 menit default
-
-    # Inject JS countdown → auto reload saat habis
-    components.html(
-        f"""<script>
-        // Clear timer lama kalau ada
-        if(window._cyrus_timer) clearTimeout(window._cyrus_timer);
-        window._cyrus_timer = setTimeout(function(){{
-            window.parent.location.reload();
-        }}, {_remaining_ms});
-        </script>""",
-        height=0)
-
-    # Juga trigger rerun langsung kalau sudah lewat 5 menit
-    if st.session_state.last_scan:
-        _elapsed_ar = now_jkt.timestamp() - st.session_state.last_scan
-        if _elapsed_ar >= 480:
-            st.rerun()
+if is_open and _has_results and st.session_state.last_scan:
+    _elapsed_ar   = now_jkt.timestamp() - st.session_state.last_scan
+    _remaining_ms = max(10000, int((480 - _elapsed_ar) * 1000))  # min 10 detik
+    # Hanya inject kalau masih perlu refresh (belum expired)
+    if _elapsed_ar < 600:  # max 10 menit
+        _components.html(
+            f"""<script>
+            if(window._cyrus_timer) clearTimeout(window._cyrus_timer);
+            window._cyrus_timer = setTimeout(function(){{
+                window.parent.location.reload();
+            }}, {_remaining_ms});
+            </script>""",
+            height=0)
 
 st.markdown(
     f"<div style='margin-top:24px;padding-top:12px;border-top:1px solid #1c2533;"
     f"font-family:Space Mono,monospace;font-size:9px;color:#4a5568;text-align:center'>"
     f"🎯 Cyrus Fund Scanner · Full IDX {len(ALL_STOCKS)} saham · Top {DISPLAY_TOP} rotating · "
-    f"DataSectors ⚡ · Auto-refresh 5m</div>",
+    f"DataSectors ⚡ · Auto-refresh 8m</div>",
     unsafe_allow_html=True)
