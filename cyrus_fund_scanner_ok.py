@@ -29,7 +29,7 @@ DISPLAY_TOP = 30
 #  Fix: @st.cache_data tidak thread-safe!
 #  Solusi: pickle di /tmp + memory dict
 # ════════════════════════════════════════
-CACHE_DIR = Path("/tmp/cyrus_cache") if Path("/tmp").exists() else Path.home() / ".cyrus_cache"
+CACHE_DIR = Path.home() / ".cyrus_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 CACHE_TTL  = 300   # 5 menit
 _mem       = {}    # {key: (timestamp, df)}
@@ -554,14 +554,12 @@ def get_fase(df):
 def build_result(ticker, df_main, df_daily, mode):
     try:
         df   = add_indicators(df_main)
-        # df_daily: raw untuk gain/val, add_indicators hanya untuk trend/fase
-        df_d = df_daily
-        df_d_ind = add_indicators(df_daily) if df_daily is not None and len(df_daily) >= 10 else None
+        df_d = add_indicators(df_daily) if df_daily is not None else None
 
         sinyal, score, flags, gc_now = get_sinyal(df, mode)
         aksi = get_aksi(score, gc_now, sinyal)
-        trend, trend_col = get_trend(df_d_ind if df_d_ind is not None else df)
-        fase,  fase_col  = get_fase(df_d_ind  if df_d_ind is not None else df)
+        trend, trend_col = get_trend(df_d if df_d is not None else df)
+        fase,  fase_col  = get_fase(df_d  if df_d is not None else df)
 
         r  = df.iloc[-1]; r1 = df.iloc[-2] if len(df) > 1 else r
         cl = sf(r.get("Close",0))
@@ -575,20 +573,12 @@ def build_result(ticker, df_main, df_daily, mode):
         e9  = sf(r.get("E9",cl))
         lw  = sf(r.get("LW",0))
 
-        # GAIN & VAL — persis Theta Turbo (float direct, no sf wrapping)
         if df_d is not None and len(df_d) >= 2:
-            try:
-                c1       = float(df_d.iloc[-1]["Close"])
-                c0       = float(df_d.iloc[-2]["Close"])
-                gain     = (c1 - c0) / max(c0, 1) * 100
-                daily_vol= float(df_d.iloc[-1]["Volume"])
-                vb       = c1 * daily_vol / 1e9
-            except:
-                gain = 0.0; vb = cl * vol / 1e9
+            c1 = sf(df_d.iloc[-1].get("Close",cl))
+            c0 = sf(df_d.iloc[-2].get("Close",cl))
+            gain = (c1 - c0) / max(c0, 1) * 100
         else:
-            gain = 0.0; vb = cl * vol / 1e9
-
-        val_str = f"{vb:.1f}B" if vb >= 1 else f"{round(vb*1000,0):.0f}M"
+            c0 = sf(r1.get("Close",cl)); gain = (cl - c0) / max(c0, 1) * 100
 
         if mode == "BSJP":
             tp = cl + 3.0 * atr; sl = cl - 1.5 * atr
@@ -604,32 +594,24 @@ def build_result(ticker, df_main, df_daily, mode):
         else:
             entry_val = int(min(cl, e9 * 1.002)); entry_str = str(entry_val)
 
+        vb = cl * vol / 1e9
+        val_str = f"{vb:.1f}B" if vb >= 1 else f"{round(vb*1000,0):.0f}M"
+
         rsi_sig, rsi_col = get_rsi_sig(rsi)
         rvol_str = f"{rv*100:.0f}%" if rv < 10 else f"{rv:.1f}x"
         prob = max(5, min(95, score + 50))
 
-        # FIX 3: ASING — hapus threshold FTotal, langsung dari FNet3/FNet8
-        # FTotal threshold bikin semua saham kecil/mid jadi "no data"
-        fnet3  = sf(r.get("FNet3", 0))
-        fnet8  = sf(r.get("FNet8", 0))
-        fratio = sf(r.get("FRatio", 0.5))
-        rfreq  = sf(r.get("RFreq", 1))
-        fbuy   = sf(r.get("FBuy", 0))
-        fsell  = sf(r.get("FSell", 0))
+        fnet3  = sf(r.get("FNet3",0))
+        fnet8  = sf(r.get("FNet8",0))
+        fratio = sf(r.get("FRatio",0.5))
+        rfreq  = sf(r.get("RFreq",1))
 
-        # Cek ada data asing atau tidak (FBuy + FSell > 0)
-        has_asing = (fbuy + fsell) > 0
-        if not has_asing:
-            fdir = "—"; fc = "#4a5568"
-        elif fnet3 > 0 and fnet8 > 0:
-            fdir = "🔵 BELI"; fc = "#4da6ff"
-        elif fnet3 < 0 and fnet8 < 0:
-            fdir = "🔴 JUAL"; fc = "#ff3d5a"
-        else:
-            fdir = "⚪ MIX"; fc = "#888888"
+        if fnet3 > 0 and fnet8 > 0:   fdir = "🔵 BELI"
+        elif fnet3 < 0 and fnet8 < 0: fdir = "🔴 JUAL"
+        else:                          fdir = "⚪ MIXED"
 
         return {
-            "T": ticker, "Prob": prob, "FDir": fdir, "FC": fc,
+            "T": ticker, "Prob": prob, "FDir": fdir,
             "FNet3": int(fnet3), "FNet8": int(fnet8),
             "FRatio": round(fratio,2), "RFreq": round(rfreq,1),
             "Gain": round(gain,1), "Wick": round(lw,1),
@@ -644,8 +626,8 @@ def build_result(ticker, df_main, df_daily, mode):
             "Score": score, "GC": gc_now,
             "Flags": " · ".join(flags[:3]), "ATR": round(atr,0),
         }
-    except Exception as _e:
-        return None  # silently skip bad tickers
+    except:
+        return None
 
 # ════════════════════════════════════════
 #  SCAN ENGINE — PARALLEL + LIVE PREVIEW
@@ -680,7 +662,7 @@ def do_scan(stocks, mode, pb, status_ph, preview_ph=None, force_fresh=False):
 
     def _fm(t): return t, _fetch_raw(t, tf, True)
     done = [0]
-    with ThreadPoolExecutor(max_workers=10) as ex:
+    with ThreadPoolExecutor(max_workers=20) as ex:
         futs = {ex.submit(_fm, t): t for t in need_main}
         for f in as_completed(futs):
             done[0] += 1
@@ -691,15 +673,14 @@ def do_scan(stocks, mode, pb, status_ph, preview_ph=None, force_fresh=False):
                 if df is not None and len(df) >= 20: raw_main[t] = df
             except: pass
 
-    if True:  # Fetch daily untuk SEMUA mode — Gain & Val harus akurat
+    if mode != "Swing":
         need_ctx = [t for t in stocks]
         status_ph.markdown(
             '<div style="font-family:Space Mono,monospace;font-size:11px;color:#00e5ff">'
-            '📅 Daily context untuk Gain & Val (10 threads)...</div>',
-            unsafe_allow_html=True)
+            '📅 Daily context (10 threads)...</div>', unsafe_allow_html=True)
         def _fc(t): return t, _fetch_raw(t, "daily", force_fresh)
         done2 = [0]
-        with ThreadPoolExecutor(max_workers=10) as ex:
+        with ThreadPoolExecutor(max_workers=20) as ex:
             futs = {ex.submit(_fc, t): t for t in need_ctx}
             for f in as_completed(futs):
                 done2[0] += 1
@@ -707,8 +688,7 @@ def do_scan(stocks, mode, pb, status_ph, preview_ph=None, force_fresh=False):
                     pb.progress(0.43 + (done2[0] / max(n, 1)) * 0.35)
                 try:
                     t, df = f.result(timeout=15)
-                    if df is not None and len(df) >= 2:
-                        raw_ctx[t] = df
+                    if df is not None: raw_ctx[t] = df
                 except: pass
 
     pb.progress(0.85)
@@ -751,49 +731,16 @@ button[data-testid="baseButton-primary"]{background:#ff7b00!important;color:#000
 st.markdown(_CSS, unsafe_allow_html=True)
 
 # ════════════════════════════════════════
-#  SESSION STATE INIT + DISK PERSISTENCE
-#  Fix: browser reload (JS timer) reset session state.
-#  Solusi: simpan hasil scan ke disk, load otomatis saat startup.
+#  SESSION STATE INIT
 # ════════════════════════════════════════
-RESULTS_FILE = CACHE_DIR / "last_results.pkl"
-RESULTS_TTL  = 600  # 10 menit — hasil masih relevan
-
-def save_results(mode, results, scan_ts):
-    """Simpan hasil scan ke disk."""
-    try:
-        data = {"mode": mode, "results": results, "ts": scan_ts,
-                "keys": {f"res_{mode.lower()}": results}}
-        RESULTS_FILE.write_bytes(pickle.dumps(data))
-    except: pass
-
-def load_results():
-    """Load hasil scan dari disk kalau masih fresh."""
-    try:
-        if RESULTS_FILE.exists():
-            data = pickle.loads(RESULTS_FILE.read_bytes())
-            if time.time() - data["ts"] < RESULTS_TTL:
-                return data
-    except: pass
-    return None
-
 _defaults = {
     "res_momentum":[], "res_intraday":[], "res_bsjp":[], "res_swing":[], "wl_res":[],
-    "last_scan": None, "scan_mode": "", "wl_tickers": [],
+    "last_scan": None, "scan_mode": "",
+    "wl_tickers": [],
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
-
-# Auto-restore dari disk setelah browser refresh
-if not any([st.session_state.res_momentum, st.session_state.res_intraday,
-            st.session_state.res_bsjp, st.session_state.res_swing]):
-    _saved = load_results()
-    if _saved:
-        mode_key = f"res_{_saved['mode'].lower()}"
-        if mode_key in st.session_state:
-            st.session_state[mode_key] = _saved["results"]
-        st.session_state.last_scan = _saved["ts"]
-        st.session_state.scan_mode = _saved["mode"]
 
 # ════════════════════════════════════════
 #  UI HELPERS
@@ -821,18 +768,16 @@ def _sb(s):
 
 def show_met(res):
     if not res: return
-    try:
-        bd   = sum(1 for x in res if "BANDAR"  in x.get("Sinyal",""))
-        hk   = sum(1 for x in res if "HAKA"    in x.get("Sinyal",""))
-        sp   = sum(1 for x in res if "SUPER"   in x.get("Sinyal",""))
-        rb   = sum(1 for x in res if "REBOUND" in x.get("Sinyal",""))
-        beli = sum(1 for x in res if "AT ENTRY" in x.get("Aksi",""))
-        ab   = sum(1 for x in res if "BELI" in x.get("FDir",""))
-        aj   = sum(1 for x in res if "JUAL" in x.get("FDir",""))
-        ap   = round(sum(x.get("Prob",50) for x in res) / len(res))
-        pc   = "#00ff88" if ap >= 65 else "#ffb700" if ap >= 55 else "#ff3d5a"
-        top  = res[0].get("T","—")
-    except: return
+    bd   = sum(1 for x in res if "BANDAR"  in x["Sinyal"])
+    hk   = sum(1 for x in res if "HAKA"    in x["Sinyal"])
+    sp   = sum(1 for x in res if "SUPER"   in x["Sinyal"])
+    rb   = sum(1 for x in res if "REBOUND" in x["Sinyal"])
+    beli = sum(1 for x in res if "AT ENTRY" in x["Aksi"])
+    ab   = sum(1 for x in res if "BELI" in x.get("FDir",""))
+    aj   = sum(1 for x in res if "JUAL" in x.get("FDir",""))
+    ap   = round(sum(x["Prob"] for x in res) / len(res))
+    pc   = "#00ff88" if ap >= 65 else "#ffb700" if ap >= 55 else "#ff3d5a"
+    top  = res[0]["T"]
     html = '<div style="display:flex;gap:8px;margin:10px 0;flex-wrap:wrap">'
     for lbl,val,col in [
         ("BANDAR 🔵",bd,"#4da6ff"),("HAKA 🔨",hk,"#00ff88"),
@@ -853,32 +798,30 @@ def show_tbl(res):
     if not res: return
     rows = ""
     for r in res:
-        try:
-            gc = "#00ff88" if r.get("Gain",0) > 0 else "#ff3d5a"
-            wc = "#00ff88" if r.get("Wick",0) > 30 else "#4a5568"
-            rc = r.get("RSI_Col","#4a5568")
-            fd = r.get("FDir","—")
-            fc = r.get("FC","#4a5568")
-            rows += "<tr style='font-family:Space Mono,monospace;font-size:10px'>"
-            rows += f"<td style='padding:5px 8px;font-weight:700;color:#e6edf3;border-bottom:1px solid #1c2533;white-space:nowrap'>{r.get('T','?')}</td>"
-            rows += f"<td style='padding:5px 6px;color:{gc};font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r.get('Gain',0):+.1f}%</td>"
-            rows += f"<td style='padding:5px 6px;color:{wc};border-bottom:1px solid #1c2533;text-align:center'>{int(r.get('Wick',0))}%</td>"
-            rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'>{_ab(r.get('Aksi','WAIT'))}</td>"
-            rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'>{_sb(r.get('Sinyal','—'))}</td>"
-            rows += f"<td style='padding:5px 6px;color:#ff7b00;font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r.get('RVOL_str','—')}</td>"
-            rows += f"<td style='padding:5px 6px;color:#4a5568;border-bottom:1px solid #1c2533;text-align:center'>{r.get('Entry_str','—')}</td>"
-            rows += f"<td style='padding:5px 6px;color:#e6edf3;font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r.get('Now',0):,}</td>"
-            rows += f"<td style='padding:5px 6px;background:#0d2b0d;color:#00ff88;font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r.get('TP',0):,}</td>"
-            rows += f"<td style='padding:5px 6px;background:#2b0d0d;color:#ff3d5a;border-bottom:1px solid #1c2533;text-align:center'>{r.get('SL',0):,}</td>"
-            rows += f"<td style='padding:5px 6px;color:#00ff88;border-bottom:1px solid #1c2533;text-align:center'>{r.get('Profit',0):.1f}%</td>"
-            rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'><span style='color:{rc};font-weight:700'>{r.get('RSI_Sig','—')}</span></td>"
-            rows += f"<td style='padding:5px 6px;color:{rc};border-bottom:1px solid #1c2533;text-align:center'>{r.get('RSI5',0):.0f}</td>"
-            rows += f"<td style='padding:5px 6px;color:#4a5568;font-size:9px;border-bottom:1px solid #1c2533;text-align:center'>{r.get('Val','—')}</td>"
-            rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'><span style='color:{r.get('Fase_col','#4a5568')};font-size:10px'>{r.get('Fase','')}</span></td>"
-            rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'><span style='color:{r.get('Trend_col','#4a5568')};font-weight:700;font-size:10px'>{r.get('Trend','')}</span></td>"
-            rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center;font-size:10px'><span style='color:{fc}'>{fd}</span></td>"
-            rows += "</tr>"
-        except: continue
+        gc = "#00ff88" if r["Gain"] > 0 else "#ff3d5a"
+        wc = "#00ff88" if r["Wick"] > 30 else "#4a5568"
+        rc = r["RSI_Col"]
+        fd = r.get("FDir","⚪")
+        fc = "#4da6ff" if "BELI" in fd else "#ff3d5a" if "JUAL" in fd else "#4a5568"
+        rows += "<tr style='font-family:Space Mono,monospace;font-size:10px'>"
+        rows += f"<td style='padding:5px 8px;font-weight:700;color:#e6edf3;border-bottom:1px solid #1c2533;white-space:nowrap'>{r['T']}</td>"
+        rows += f"<td style='padding:5px 6px;color:{gc};font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r['Gain']:+.1f}%</td>"
+        rows += f"<td style='padding:5px 6px;color:{wc};border-bottom:1px solid #1c2533;text-align:center'>{int(r['Wick'])}%</td>"
+        rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'>{_ab(r['Aksi'])}</td>"
+        rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'>{_sb(r['Sinyal'])}</td>"
+        rows += f"<td style='padding:5px 6px;color:#ff7b00;font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r['RVOL_str']}</td>"
+        rows += f"<td style='padding:5px 6px;color:#4a5568;border-bottom:1px solid #1c2533;text-align:center'>{r['Entry_str']}</td>"
+        rows += f"<td style='padding:5px 6px;color:#e6edf3;font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r['Now']:,}</td>"
+        rows += f"<td style='padding:5px 6px;background:#0d2b0d;color:#00ff88;font-weight:700;border-bottom:1px solid #1c2533;text-align:center'>{r['TP']:,}</td>"
+        rows += f"<td style='padding:5px 6px;background:#2b0d0d;color:#ff3d5a;border-bottom:1px solid #1c2533;text-align:center'>{r['SL']:,}</td>"
+        rows += f"<td style='padding:5px 6px;color:#00ff88;border-bottom:1px solid #1c2533;text-align:center'>{r['Profit']:.1f}%</td>"
+        rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'><span style='color:{rc};font-weight:700'>{r['RSI_Sig']}</span></td>"
+        rows += f"<td style='padding:5px 6px;color:{rc};border-bottom:1px solid #1c2533;text-align:center'>{r['RSI5']:.0f}</td>"
+        rows += f"<td style='padding:5px 6px;color:#4a5568;font-size:9px;border-bottom:1px solid #1c2533;text-align:center'>{r['Val']}</td>"
+        rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'><span style='color:{r.get('Fase_col','#4a5568')};font-size:10px'>{r.get('Fase','')}</span></td>"
+        rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center'><span style='color:{r.get('Trend_col','#4a5568')};font-weight:700;font-size:10px'>{r.get('Trend','')}</span></td>"
+        rows += f"<td style='padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center;font-size:10px'><span style='color:{fc}'>{fd}</span></td>"
+        rows += "</tr>"
     hdrs = "".join(
         f"<th style='padding:7px 6px;color:{TC.get(h,'#4a5568')};font-family:Space Mono,monospace;font-size:9px;"
         f"letter-spacing:1px;border-bottom:2px solid #1c2533;{'text-align:left' if h=='EMITEN' else ''}'>{h}</th>"
@@ -899,7 +842,7 @@ def show_cards(res):
         for ci, r in enumerate(res[idx:idx+3]):
             pc = "#00ff88" if r["Prob"] >= 75 else "#ffb700" if r["Prob"] >= 60 else "#ff7b00"
             gc = "#00ff88" if r["Gain"] > 0 else "#ff3d5a"
-            fd = r.get("FDir","—"); fc = r.get("FC","#4a5568")
+            fd = r.get("FDir","⚪"); fc = "#4da6ff" if "BELI" in fd else "#ff3d5a" if "JUAL" in fd else "#4a5568"
             bc = "#4da6ff44" if "BANDAR" in r["Sinyal"] else "#1c2533"
             with cols[ci]:
                 st.markdown(
@@ -1010,7 +953,6 @@ with tab_mom:
         _pb=st.progress(0); _msg=st.empty()
         st.session_state.res_momentum=do_scan(ALL_STOCKS,"Momentum",_pb,_msg,force_fresh=_force_m)
         st.session_state.last_scan=now_jkt.timestamp(); st.session_state.scan_mode="Momentum"
-        save_results("Momentum",st.session_state.res_momentum,st.session_state.last_scan)
         _pb.empty()
         if _tele_m and st.session_state.res_momentum:
             if send_tele(st.session_state.res_momentum,"Momentum"): st.toast("📡 Terkirim!",icon="✅")
@@ -1031,7 +973,6 @@ with tab_int:
         _pb=st.progress(0); _msg=st.empty()
         st.session_state.res_intraday=do_scan(ALL_STOCKS,"Intraday",_pb,_msg,force_fresh=_force_i)
         st.session_state.last_scan=now_jkt.timestamp(); st.session_state.scan_mode="Intraday"
-        save_results("Intraday",st.session_state.res_intraday,st.session_state.last_scan)
         _pb.empty()
         if _tele_i and st.session_state.res_intraday:
             if send_tele(st.session_state.res_intraday,"Intraday"): st.toast("📡 Terkirim!",icon="✅")
@@ -1057,7 +998,6 @@ with tab_bsjp:
         _pb=st.progress(0); _msg=st.empty()
         st.session_state.res_bsjp=do_scan(ALL_STOCKS,"BSJP",_pb,_msg,force_fresh=_force_b)
         st.session_state.last_scan=now_jkt.timestamp(); st.session_state.scan_mode="BSJP"
-        save_results("BSJP",st.session_state.res_bsjp,st.session_state.last_scan)
         _pb.empty()
         if _tele_b and st.session_state.res_bsjp:
             if send_tele(st.session_state.res_bsjp,"BSJP"): st.toast("📡 Terkirim!",icon="✅")
@@ -1079,7 +1019,6 @@ with tab_swing:
         _pb=st.progress(0); _msg=st.empty()
         st.session_state.res_swing=do_scan(ALL_STOCKS,"Swing",_pb,_msg,force_fresh=_force_s)
         st.session_state.last_scan=now_jkt.timestamp(); st.session_state.scan_mode="Swing"
-        save_results("Swing",st.session_state.res_swing,st.session_state.last_scan)
         _pb.empty()
         if _tele_s and st.session_state.res_swing:
             if send_tele(st.session_state.res_swing,"Swing"): st.toast("📡 Terkirim!",icon="✅")
@@ -1123,40 +1062,44 @@ with tab_wl:
         st.markdown("<div style='text-align:center;padding:48px;color:#4a5568;font-family:Space Mono,monospace'><div style='font-size:28px;margin-bottom:8px'>👁️</div><div>MASUKKAN TICKER DI ATAS</div></div>",unsafe_allow_html=True)
 
 # ════════════════════════════════════════
-#  AUTO-REFRESH — PORT EXACT DARI THETA
-#  Aturan: timer HANYA di-set kalau elapsed < 480 (belum waktunya)
-#  Kalau elapsed >= 480 = waktunya scan ulang, bukan reload lagi
-#  Ini yang fix kedap-kedip!
+#  AUTO-REFRESH — JavaScript Timer
+#  st.rerun() gak jalan saat page idle.
+#  JS timer jalan di browser, independent dari Python.
+#  Reload page setiap 5 menit → trigger rescan otomatis.
 # ════════════════════════════════════════
-import streamlit.components.v1 as _cf_comp
+import streamlit.components.v1 as components
 
 _has_results = any([st.session_state.res_momentum, st.session_state.res_intraday,
                     st.session_state.res_bsjp, st.session_state.res_swing])
 
-if is_open and _has_results and st.session_state.last_scan:
-    _el_ar  = int(now_jkt.timestamp() - st.session_state.last_scan)
-    _rem_ar = 480 - _el_ar
+if is_open and _has_results:
+    # Hitung sisa waktu ke next refresh
+    if st.session_state.last_scan:
+        _elapsed_ar = now_jkt.timestamp() - st.session_state.last_scan
+        _remaining_ms = max(0, int((480 - _elapsed_ar) * 1000))
+    else:
+        _remaining_ms = 300000  # 5 menit default
 
-    # KUNCI: hanya inject timer kalau BELUM waktunya refresh
-    # Kalau elapsed >= 480 → jangan set timer → page tetap idle
-    # sampai user klik scan atau next render
-    if _el_ar < 480:
-        _rem_ms = max(10000, _rem_ar * 1000)  # min 10 detik
-        _cf_comp.html(
-            f"""<script>
-            if (window._cyrus_ar) clearTimeout(window._cyrus_ar);
-            window._cyrus_ar = setTimeout(function() {{
-                window.parent.location.reload();
-            }}, {_rem_ms});
-            </script>""",
-            height=0)
+    # Inject JS countdown → auto reload saat habis
+    components.html(
+        f"""<script>
+        // Clear timer lama kalau ada
+        if(window._cyrus_timer) clearTimeout(window._cyrus_timer);
+        window._cyrus_timer = setTimeout(function(){{
+            window.parent.location.reload();
+        }}, {_remaining_ms});
+        </script>""",
+        height=0)
 
-_m_ar = int(max(0, 480 - (now_jkt.timestamp() - st.session_state.last_scan)) // 60) if st.session_state.last_scan else 8
-_s_ar = int(max(0, 480 - (now_jkt.timestamp() - st.session_state.last_scan)) % 60)  if st.session_state.last_scan else 0
+    # Juga trigger rerun langsung kalau sudah lewat 5 menit
+    if st.session_state.last_scan:
+        _elapsed_ar = now_jkt.timestamp() - st.session_state.last_scan
+        if _elapsed_ar >= 480:
+            st.rerun()
 
 st.markdown(
     f"<div style='margin-top:24px;padding-top:12px;border-top:1px solid #1c2533;"
     f"font-family:Space Mono,monospace;font-size:9px;color:#4a5568;text-align:center'>"
     f"🎯 Cyrus Fund Scanner · Full IDX {len(ALL_STOCKS)} saham · Top {DISPLAY_TOP} rotating · "
-    f"DataSectors ⚡ · Next refresh: {_m_ar:02d}:{_s_ar:02d}</div>",
+    f"DataSectors ⚡ · Auto-refresh 5m</div>",
     unsafe_allow_html=True)
