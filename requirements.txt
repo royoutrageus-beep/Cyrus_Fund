@@ -1,6 +1,18 @@
-streamlit>=1.32.0
-requests>=2.31.0
+# ══════════════════════════════════════
+#  Crypto Turbo — requirements.txt
+#  Streamlit Cloud deployment
+# ══════════════════════════════════════
+
+# Core framework
+streamlit>=1.35.0
+
+# Crypto exchange data
+ccxt>=4.3.0
+
+# Data processing
 pandas>=2.0.0
-numpy>=1.24.0
-pytz>=2023.3
-yfinance>=0.2.36
+numpy>=1.26.0
+
+# Utilities
+requests>=2.31.0
+pytz>=2024.1
