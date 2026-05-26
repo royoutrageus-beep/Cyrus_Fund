@@ -725,6 +725,16 @@ tab_scanner, tab_watchlist, tab_market, tab_backtest = st.tabs(
 #  TAB 1: SCANNER
 # ════════════════════════════════════════════════════
 with tab_scanner:
+    # ── Auto regime: update ss_scan_mode SEBELUM expander render ──
+    # Ini fixes auto mode: ss_scan_mode selalu fresh dari BTC regime
+    _is_auto_regime = st.session_state.get("auto_reg", True)
+    if _is_auto_regime:
+        st.session_state.ss_scan_mode = rcfg["mode"]
+        # Auto-threshold juga perlu update setiap regime berubah
+        if st.session_state.get("ss_auto_thresh", True):
+            st.session_state.ss_min_score  = rcfg["min_score"]
+            st.session_state.ss_vol_thresh = rcfg["min_rvol"]
+
     with st.expander("⚙️ Scanner Settings", expanded=False):
         sc1,sc2,sc3 = st.columns(3)
         with sc1:
@@ -908,7 +918,56 @@ with tab_scanner:
                 f'✅ {done_count[0]}/{n_pairs} selesai · {len(results)} signal ditemukan...</div>',
                 unsafe_allow_html=True)
 
+
         prog_ph.empty(); pb.empty()
+
+        # Fallback: kalau 0 hasil & min_score ketat, retry dengan Score≥2
+        if not results and min_score > 2:
+            _fb_ph = st.empty()
+            _fb_ph.markdown(
+                f'<div style="color:#ffb700;font-family:Space Mono,monospace;font-size:11px;">'  
+                f'⚠️ 0 hasil (Score≥{min_score}). Retry Score≥2 top 30 pairs...</div>',
+                unsafe_allow_html=True)
+            _ex2 = get_exchange()
+            for _p2 in scan_pairs[:30]:
+                try:
+                    _raw2=_ex2.fetch_ohlcv(_p2,tf_scan,limit=220)
+                    if not _raw2 or len(_raw2)<min_bars: continue
+                    _df2=pd.DataFrame(_raw2,columns=["ts","Open","High","Low","Close","Volume"])
+                    _df2["ts"]=pd.to_datetime(_df2["ts"],unit="ms",utc=True).dt.tz_convert(WIB)
+                    _df2.set_index("ts",inplace=True); _df2=_df2.astype(float)
+                    _df2=apply_indicators(_df2)
+                    _r2=_df2.iloc[-1]; _p2r=_df2.iloc[-2]; _p3r=_df2.iloc[-3] if len(_df2)>=3 else _p2r
+                    _cl2=float(_r2["Close"]); _vo2=float(_r2["Volume"])
+                    if _cl2*_vo2<min_vol_idr or float(_r2["RVOL"])<1.0: continue
+                    if scan_mode=="Scalping ⚡":   _sc2,_re2,_=score_scalping(_r2,_p2r,_p3r)
+                    elif scan_mode=="Momentum 🚀": _sc2,_re2,_=score_momentum(_r2,_p2r,_p3r)
+                    elif scan_mode=="Bagger 💎":   _sc2,_re2,_=score_bagger(_r2,_p2r,_p3r,_df2)
+                    else:                          _sc2,_re2,_=score_reversal(_r2,_p2r,_p3r)
+                    if _sc2<2: continue
+                    _sg2=get_signal(_sc2,scan_mode)
+                    if _sg2=="WAIT": continue
+                    _at2=float(_r2["ATR"]) if not np.isnan(float(_r2["ATR"])) else _cl2*0.02
+                    _slm=rcfg.get("sl_mult",0.8)
+                    if scan_mode=="Scalping ⚡":   _tp2=_cl2+1.5*_at2; _sl2=_cl2-_slm*_at2
+                    elif scan_mode=="Momentum 🚀": _tp2=_cl2+2.0*_at2; _sl2=_cl2-_slm*_at2
+                    elif scan_mode=="Bagger 💎":   _tp2=_cl2+3.5*_at2; _sl2=_cl2-1.2*_at2
+                    else:                          _tp2=_cl2+2.5*_at2; _sl2=_cl2-_slm*_at2
+                    _rr2=(_tp2-_cl2)/max(_cl2-_sl2,0.0001)
+                    _cn2=_p2.split("/")[0]
+                    _e9=float(_r2["EMA9"]); _e21=float(_r2["EMA21"]); _e50=float(_r2["EMA50"])
+                    _tr2="▲ UP" if _e9>_e21>_e50 else("▼ DOWN" if _e9<_e21<_e50 else "◆ SIDE")
+                    results.append({"Pair":_p2,"Coin":_cn2,"Price":_cl2,"Score":_sc2,
+                        "Signal":_sg2,"Trend":_tr2,"TF":tf_scan,
+                        "RSI-EMA":round(float(_r2["RSI_EMA"]),1),"Stoch K":round(float(_r2["STOCH_K"]),1),
+                        "RVOL":round(float(_r2["RVOL"]),2),"BB%":round(float(_r2["BB_pct"]),2),
+                        "ROC 3%":round(float(_r2["ROC3"])*100,2),"MACD Hist":round(float(_r2["MACD_Hist"]),6),
+                        "Vol IDR(M)":round(_cl2*_vo2/1e6,1),"TP":_tp2,"SL":_sl2,"R:R":round(_rr2,1),
+                        "Reasons":"[Retry≥2] "+" · ".join(_re2),"_class":get_card_class(_sg2)})
+                except: pass
+                time.sleep(_ex2.rateLimit/1000*0.3)
+            _fb_ph.empty()
+
         st.session_state.scan_results=results
         st.session_state.last_scan_time=now_wib.timestamp()
         st.session_state.last_scan_mode=scan_mode
@@ -1141,40 +1200,54 @@ with tab_watchlist:
             if row["Price"]==0:
                 ch+=f'<div class="signal-card"><div class="sc-ticker">{row["Coin"]}</div><div style="font-size:11px;color:#4a5568;margin-top:6px;">{row.get("Signal","No data")}</div></div>'
                 continue
-            sc_int=int(row["Score"]); bars="".join([f'<div class="sc-bar {"filled" if i<sc_int else "empty"}" style="width:24px"></div>' for i in range(6)])
-            _bar_parts=(['<div class="sc-bar filled" style="width:24px"></div>']*sc_int +
-                        ['<div class="sc-bar empty"  style="width:24px"></div>']*(6-sc_int))
-            bars="".join(_bar_parts)
+            sc_int=int(row["Score"])
+            is_bag="BAGGER" in row.get("Signal","") or "KANDIDAT" in row.get("Signal","")
+            _bar_cls="filled-purple" if is_bag else "filled"
+            _bps=([f'<div class="sc-bar {_bar_cls}" style="width:24px"></div>']*sc_int+
+                  ['<div class="sc-bar empty" style="width:24px"></div>']*(6-sc_int))
+            bars="".join(_bps)
+            sig=row.get("Signal","-")
+            if is_bag:                                        sc_col="#bf5fff"
+            elif "GACOR" in sig or "REVERSAL" in sig:        sc_col="#00ff88"
+            elif "POTENSIAL" in sig:                          sc_col="#ffb700"
+            elif "WATCH" in sig:                             sc_col="#00e5ff"
+            else:                                             sc_col="#4a5568"
+            sc_score_col="#00ff88" if sc_int>=5 else "#ffb700" if sc_int>=4 else "#00e5ff"
+            rsi_v=row["RSI-EMA"]
+            rsi_c=("#ff3d5a" if rsi_v<30 else "#ffb700" if rsi_v<45
+                   else "#00ff88" if rsi_v>60 else "#c9d1d9")
             roc_c="#00ff88" if row.get("ROC 3%",0)>0 else "#ff3d5a"
             te="📈" if "▲" in row["Trend"] else("📉" if "▼" in row["Trend"] else "➡️")
             fr_v=row.get("FR","N/A")
-            fr_c="#ff3d5a" if "+" in str(fr_v) and fr_v!="N/A" else("#00ff88" if "-" in str(fr_v) else "#4a5568")
-            ch+=f"""<div class="signal-card {row['_class']}">
-              <div style="display:flex;justify-content:space-between;">
-                <div><div class="sc-ticker">{row['Coin']} <span style="font-size:8px;color:#4a5568;">[{row['TF']}]</span></div>
-                <div class="sc-price" style="color:{roc_c}">{fmt_price(row['Price'])} {te}</div></div>
-                <div style="text-align:right">
-                  <div style="font-size:9px;color:#4a5568;font-family:Space Mono,monospace">SCORE</div>
-                  <div style="font-size:22px;font-weight:700;color:{sc_col};font-family:Space Mono,monospace">{row['Score']}</div>
-                </div>
-              </div>
-              <div class="sc-signal" style="color:{sc_col}">{sig}</div>
-              <div class="sc-bars">{bars}</div>
-              <div class="sc-stats">
-                <div class="sc-stat">RSI <span style="color:{rsi_c}">{rsi_v}</span></div>
-                <div class="sc-stat">STOCH <span>{row['Stoch K']:.0f}</span></div>
-                <div class="sc-stat">RVOL <span>{row['RVOL']}x</span></div>
-              </div>
-              <div class="sc-stats" style="margin-top:6px">
-                <div class="sc-stat">TP <span style="color:#00ff88">{fmt_price(row['TP'])}</span></div>
-                <div class="sc-stat">SL <span style="color:#ff3d5a">{fmt_price(row['SL'])}</span></div>
-                <div class="sc-stat">R:R <span>{row['R:R']}</span></div>
-              </div>
-              <div style="margin-top:6px;font-family:Space Mono,monospace;font-size:9px;color:#4a5568;">
-                FR Sentiment: <span style="color:{fr_c}">{fr_v}</span>
-              </div>
-              <div style="margin-top:6px;font-size:10px;color:#4a5568;font-family:Space Mono,monospace;line-height:1.4">{row['Reasons'][:80]}</div>
-            </div>"""
+            fr_c=("#ff3d5a" if "+" in str(fr_v) and fr_v!="N/A"
+                  else "#00ff88" if "-" in str(fr_v) else "#4a5568")
+            ch+=(
+                f'<div class="signal-card {row["_class"]}">'
+                f'<div style="display:flex;justify-content:space-between;">'
+                f'<div><div class="sc-ticker">{row["Coin"]}'
+                f' <span style="font-size:8px;color:#4a5568;">[{row["TF"]}]</span></div>'
+                f'<div class="sc-price" style="color:{roc_c}">{fmt_price(row["Price"])} {te}</div></div>'
+                f'<div style="text-align:right">'
+                f'<div style="font-size:9px;color:#4a5568;font-family:Space Mono,monospace">SCORE</div>'
+                f'<div style="font-size:22px;font-weight:700;color:{sc_score_col};font-family:Space Mono,monospace">{row["Score"]}</div>'
+                f'</div></div>'
+                f'<div class="sc-signal" style="color:{sc_col}">{sig}</div>'
+                f'<div class="sc-bars">{bars}</div>'
+                f'<div class="sc-stats">'
+                f'<div class="sc-stat">RSI <span style="color:{rsi_c}">{rsi_v}</span></div>'
+                f'<div class="sc-stat">STOCH <span>{row["Stoch K"]:.0f}</span></div>'
+                f'<div class="sc-stat">RVOL <span>{row["RVOL"]}x</span></div>'
+                f'</div>'
+                f'<div class="sc-stats" style="margin-top:6px">'
+                f'<div class="sc-stat">TP <span style="color:#00ff88">{fmt_price(row["TP"])}</span></div>'
+                f'<div class="sc-stat">SL <span style="color:#ff3d5a">{fmt_price(row["SL"])}</span></div>'
+                f'<div class="sc-stat">R:R <span>{row["R:R"]}</span></div>'
+                f'</div>'
+                f'<div style="margin-top:6px;font-family:Space Mono,monospace;font-size:9px;color:#4a5568;">'
+                f'FR: <span style="color:{fr_c}">{fr_v}</span></div>'
+                f'<div style="margin-top:6px;font-size:10px;color:#4a5568;font-family:Space Mono,monospace;line-height:1.4">{row["Reasons"][:80]}</div>'
+                f'</div>'
+            )
         ch+="</div>"
         st.markdown(ch,unsafe_allow_html=True)
 
