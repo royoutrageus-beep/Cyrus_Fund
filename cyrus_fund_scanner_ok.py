@@ -6,6 +6,7 @@ import numpy as np
 import pytz
 import time
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ════════════════════════════════════════════════════
 #  CONFIG
@@ -732,7 +733,12 @@ with tab_scanner:
                 scan_tf="1d"
                 st.markdown('<div style="font-size:10px;color:#bf5fff;padding:6px;background:rgba(191,95,255,.1);border-radius:4px;">📅 Bagger: Daily TF otomatis</div>',unsafe_allow_html=True)
             else:
-                scan_tf=st.radio("Timeframe",tf_options,horizontal=True,key="scan_tf")
+                _prev_tf=st.session_state.get("active_tf","15m")
+                _tf_opts=["15m","1h","4h"]
+                _tf_idx=_tf_opts.index(_prev_tf) if _prev_tf in _tf_opts else 0
+                scan_tf=st.radio("Timeframe",_tf_opts,index=_tf_idx,horizontal=True,key="scan_tf")
+            # Persist tf ke session_state
+            st.session_state.active_tf=scan_tf
             auto_thresh=st.toggle("🤖 Auto-Threshold",value=True,key="auto_thr")
             if auto_thresh:
                 min_score=rcfg["min_score"]; vol_thresh=rcfg["min_rvol"]
@@ -757,7 +763,9 @@ with tab_scanner:
         _el=_now_chk-st.session_state.last_scan_time
         if _el>=300 and st.session_state.scan_results:
             do_scan=True; auto_triggered=True
-            scan_mode=st.session_state.get("active_scan_mode",scan_mode)
+            # Restore mode & tf dari session_state — CRITICAL untuk auto refresh
+            scan_mode=st.session_state.get("active_scan_mode", scan_mode)
+            scan_tf  =st.session_state.get("active_tf", "15m")
 
     if do_scan:
         all_pairs=get_idr_pairs()
@@ -775,57 +783,91 @@ with tab_scanner:
             f'{label} {n_pairs} pairs · {scan_mode} · {tf_scan} · Indodax IDR</div>',
             unsafe_allow_html=True)
 
-        results=[]; ex=get_exchange()
-        for i,pair in enumerate(scan_pairs):
-            pb.progress((i+1)/max(n_pairs,1))
+        # ══ PARALLEL BATCH FETCH — 5 threads, partisi 10 pair ══
+        # Indodax rate limit: 10 req/s → 5 threads aman
+        results   = []
+        done_count= [0]
+        WORKERS   = 5
+        CHUNK     = 10   # partisi per batch
+
+        def _fetch_one(pair):
+            """Fetch + parse satu pair — thread safe."""
             try:
-                raw=ex.fetch_ohlcv(pair,tf_scan,limit=220)
-                if not raw or len(raw)<min_bars: continue
-                df=pd.DataFrame(raw,columns=["ts","Open","High","Low","Close","Volume"])
-                df["ts"]=pd.to_datetime(df["ts"],unit="ms",utc=True).dt.tz_convert(WIB)
-                df.set_index("ts",inplace=True); df=df.astype(float)
-                df=apply_indicators(df)
-                r=df.iloc[-1]; p=df.iloc[-2]; p2=df.iloc[-3] if len(df)>=3 else p
-                close=float(r["Close"]); vol=float(r["Volume"])
-                # Turnover dalam IDR
-                vol_idr=close*vol
-                rvol=float(r["RVOL"])
-                if vol_idr<min_vol_idr or rvol<vol_thresh: continue
+                # Tiap thread buat exchange instance sendiri — thread safe
+                _ex = ccxt.indodax({"enableRateLimit": True, "timeout": 12000})
+                raw = _ex.fetch_ohlcv(pair, tf_scan, limit=220)
+                if not raw or len(raw) < min_bars:
+                    return pair, None
+                df = pd.DataFrame(raw, columns=["ts","Open","High","Low","Close","Volume"])
+                df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.tz_convert(WIB)
+                df.set_index("ts", inplace=True)
+                df = df.astype(float)
+                return pair, df
+            except:
+                return pair, None
 
-                if scan_mode=="Scalping ⚡":   sc,reasons,_=score_scalping(r,p,p2)
-                elif scan_mode=="Momentum 🚀": sc,reasons,_=score_momentum(r,p,p2)
-                elif scan_mode=="Bagger 💎":   sc,reasons,_=score_bagger(r,p,p2,df)
-                else:                          sc,reasons,_=score_reversal(r,p,p2)
-                if sc<min_score: continue
-                sig=get_signal(sc,scan_mode)
-                if sig=="WAIT": continue
+        # Proses per chunk — update progress setiap chunk selesai
+        for chunk_start in range(0, n_pairs, CHUNK):
+            chunk = scan_pairs[chunk_start:chunk_start + CHUNK]
+            prog_ph.markdown(
+                f'<div style="color:#f7931a;font-family:Space Mono,monospace;font-size:11px;">' 
+                f'⚡ Fetching {chunk_start+1}-{min(chunk_start+CHUNK, n_pairs)}'
+                f' dari {n_pairs} pairs · {scan_mode} · {tf_scan}...</div>',
+                unsafe_allow_html=True)
 
-                atr=float(r["ATR"]) if not np.isnan(float(r["ATR"])) else close*0.02
-                slm=rcfg.get("sl_mult",0.8)
-                if scan_mode=="Scalping ⚡":   tp=close+1.5*atr; sl=close-slm*atr
-                elif scan_mode=="Momentum 🚀": tp=close+2.0*atr; sl=close-slm*atr
-                elif scan_mode=="Bagger 💎":   tp=close+3.5*atr; sl=close-1.2*atr
-                else:                          tp=close+2.5*atr; sl=close-slm*atr
-                rr=(tp-close)/max(close-sl,0.0001)
+            with ThreadPoolExecutor(max_workers=WORKERS) as ex_pool:
+                futs = {ex_pool.submit(_fetch_one, p): p for p in chunk}
+                for fut in as_completed(futs):
+                    try:
+                        pair, df = fut.result(timeout=15)
+                        done_count[0] += 1
+                        if df is None: continue
 
-                coin=pair.split("/")[0]
-                e9=float(r["EMA9"]); e21=float(r["EMA21"]); e50=float(r["EMA50"])
-                trend="▲ UP" if e9>e21>e50 else("▼ DOWN" if e9<e21<e50 else "◆ SIDE")
-                roc3=float(r["ROC3"])*100
+                        df = apply_indicators(df)
+                        r = df.iloc[-1]; p_r = df.iloc[-2]
+                        p2_r = df.iloc[-3] if len(df) >= 3 else p_r
+                        close = float(r["Close"]); vol = float(r["Volume"])
+                        vol_idr = close * vol; rvol = float(r["RVOL"])
+                        if vol_idr < min_vol_idr or rvol < vol_thresh: continue
 
-                results.append({
-                    "Pair":pair,"Coin":coin,"Price":close,"Score":sc,"Signal":sig,
-                    "Trend":trend,"TF":tf_scan,"RSI-EMA":round(float(r["RSI_EMA"]),1),
-                    "Stoch K":round(float(r["STOCH_K"]),1),"RVOL":round(rvol,2),
-                    "BB%":round(float(r["BB_pct"]),2),"ROC 3%":round(roc3,2),
-                    "MACD Hist":round(float(r["MACD_Hist"]),6),
-                    "Vol IDR(M)":round(vol_idr/1e6,1),
-                    "TP":tp,"SL":sl,"R:R":round(rr,1),
-                    "Reasons":" · ".join(reasons),
-                    "_class":get_card_class(sig),
-                })
-            except: pass
-            time.sleep(ex.rateLimit/1000*0.5)
+                        if scan_mode=="Scalping ⚡":   sc,reasons,_=score_scalping(r,p_r,p2_r)
+                        elif scan_mode=="Momentum 🚀": sc,reasons,_=score_momentum(r,p_r,p2_r)
+                        elif scan_mode=="Bagger 💎":   sc,reasons,_=score_bagger(r,p_r,p2_r,df)
+                        else:                          sc,reasons,_=score_reversal(r,p_r,p2_r)
+                        if sc < min_score: continue
+                        sig = get_signal(sc, scan_mode)
+                        if sig == "WAIT": continue
+
+                        atr = float(r["ATR"]) if not np.isnan(float(r["ATR"])) else close*0.02
+                        slm = rcfg.get("sl_mult", 0.8)
+                        if scan_mode=="Scalping ⚡":   tp=close+1.5*atr; sl=close-slm*atr
+                        elif scan_mode=="Momentum 🚀": tp=close+2.0*atr; sl=close-slm*atr
+                        elif scan_mode=="Bagger 💎":   tp=close+3.5*atr; sl=close-1.2*atr
+                        else:                          tp=close+2.5*atr; sl=close-slm*atr
+                        rr = (tp-close) / max(close-sl, 0.0001)
+
+                        coin = pair.split("/")[0]
+                        e9=float(r["EMA9"]); e21=float(r["EMA21"]); e50=float(r["EMA50"])
+                        trend = "▲ UP" if e9>e21>e50 else ("▼ DOWN" if e9<e21<e50 else "◆ SIDE")
+                        results.append({
+                            "Pair":pair,"Coin":coin,"Price":close,"Score":sc,"Signal":sig,
+                            "Trend":trend,"TF":tf_scan,"RSI-EMA":round(float(r["RSI_EMA"]),1),
+                            "Stoch K":round(float(r["STOCH_K"]),1),"RVOL":round(rvol,2),
+                            "BB%":round(float(r["BB_pct"]),2),"ROC 3%":round(float(r["ROC3"])*100,2),
+                            "MACD Hist":round(float(r["MACD_Hist"]),6),
+                            "Vol IDR(M)":round(vol_idr/1e6,1),
+                            "TP":tp,"SL":sl,"R:R":round(rr,1),
+                            "Reasons":" · ".join(reasons),
+                            "_class":get_card_class(sig),
+                        })
+                    except: done_count[0] += 1
+
+            # Update progress bar per chunk
+            pb.progress(min((chunk_start + CHUNK) / max(n_pairs, 1), 1.0))
+            prog_ph.markdown(
+                f'<div style="color:#00ff88;font-family:Space Mono,monospace;font-size:11px;">' 
+                f'✅ {done_count[0]}/{n_pairs} selesai · {len(results)} signal ditemukan...</div>',
+                unsafe_allow_html=True)
 
         prog_ph.empty(); pb.empty()
         st.session_state.scan_results=results
