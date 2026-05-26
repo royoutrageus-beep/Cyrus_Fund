@@ -665,6 +665,24 @@ st.markdown(f"""
   <div class="live-badge"><div class="live-dot"></div>LIVE {now_wib.strftime("%H:%M:%S")} WIB</div>
 </div>""", unsafe_allow_html=True)
 
+# ── Pre-build HTML fragments (hindari nested f-string quote conflict) ──
+btc_dom_str = f"{btc_dom:.1f}%" if btc_dom else "N/A"
+alt_dom_str = f"{100-btc_dom:.1f}%" if btc_dom else "N/A"
+
+# FR items HTML
+_fr_items_html = ""
+for _coin, _d in fr_data.items():
+    _r = _d.get("rate", 0)
+    _fc = "#ff3d5a" if _r > 0.05 else "#00ff88" if _r < -0.01 else "#ffb700"
+    _fr_items_html += (
+        f'<div style="display:flex;align-items:center;gap:4px;">'
+        f'<span style="font-size:9px;color:#4a5568;">{_coin}</span>'
+        f'<span style="font-family:Space Mono,monospace;font-size:11px;color:{_fc};">{_r:+.4f}%</span>'
+        f'</div>'
+    )
+if not _fr_items_html:
+    _fr_items_html = '<span style="font-size:10px;color:#4a5568;">Tidak tersedia</span>'
+
 # BTC Regime Banner
 st.markdown(f"""
 <div style="background:rgba(0,0,0,.4);border:1px solid {rcolor}44;border-radius:8px;
@@ -682,20 +700,17 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 
 # Info strip: BTC Dom + Funding Rate
-btc_dom_str = f"{btc_dom:.1f}%" if btc_dom else "N/A"
 st.markdown(f"""
 <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
-  <div style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px;">
+  <div style="flex:1;min-width:140px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px;">
     <div style="font-size:9px;color:var(--muted);letter-spacing:1px;">₿ BTC DOMINANCE</div>
-    <div style="font-family:Space Mono,monospace;font-size:13px;font-weight:700;color:var(--btc);">{btc_dom_str}</div>
+    <div style="font-family:Space Mono,monospace;font-size:14px;font-weight:700;color:var(--btc);">{btc_dom_str}</div>
     <div style="font-size:9px;color:#4a5568;">{dom_label}</div>
   </div>
-  <div style="flex:2;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px;">
-    <div style="font-size:9px;color:var(--muted);letter-spacing:1px;">📊 FUNDING RATE (Binance Ref · SPOT Sentiment)</div>
-    <div style="display:flex;gap:16px;margin-top:4px;flex-wrap:wrap;">
-      {"".join([f'<div><span style="font-size:9px;color:#4a5568;">{c}</span> <span style="font-family:Space Mono,monospace;font-size:11px;color:{"#ff3d5a" if d["rate"]>0.05 else "#00ff88" if d["rate"]<-0.01 else "#ffb700"};">{d["rate"]:+.4f}%</span></div>' for c,d in fr_data.items()])}
-    </div>
-    <div style="font-size:9px;color:#4a5568;margin-top:2px;">{fr_lbl}</div>
+  <div style="flex:2;min-width:200px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px;">
+    <div style="font-size:9px;color:var(--muted);letter-spacing:1px;">📊 FUNDING RATE — Binance Ref (SPOT Sentiment)</div>
+    <div style="display:flex;gap:12px;margin-top:6px;flex-wrap:wrap;">{_fr_items_html}</div>
+    <div style="font-size:9px;color:#4a5568;margin-top:4px;">{fr_lbl}</div>
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -716,65 +731,89 @@ with tab_scanner:
             st.markdown('<div class="settings-label">MODE SIGNAL</div>',unsafe_allow_html=True)
             auto_regime_tog = st.toggle("🤖 Auto BTC Regime",value=True,key="auto_reg")
             if auto_regime_tog:
-                scan_mode = rcfg["mode"]
-                st.markdown(f'<div style="font-family:Space Mono,monospace;font-size:10px;padding:6px;background:rgba(0,0,0,.3);border-radius:4px;color:{rcolor}">Auto: {scan_mode}</div>',unsafe_allow_html=True)
+                _scan_mode_val = rcfg["mode"]
+                st.markdown(
+                    f'<div style="font-family:Space Mono,monospace;font-size:10px;padding:6px;' 
+                    f'background:rgba(0,0,0,.3);border-radius:4px;color:{rcolor}">'
+                    f'Auto: {_scan_mode_val}</div>', unsafe_allow_html=True)
             else:
                 _opts=["Scalping ⚡","Momentum 🚀","Reversal 🎯","Bagger 💎"]
-                _prev=st.session_state.get("active_scan_mode","Scalping ⚡")
+                _prev=st.session_state.get("ss_scan_mode","Scalping ⚡")
                 _idx=_opts.index(_prev) if _prev in _opts else 0
-                scan_mode=st.radio("Mode",_opts,index=_idx,label_visibility="collapsed",key="scan_mode_radio")
-            st.session_state.active_scan_mode=scan_mode
+                _scan_mode_val=st.radio("Mode",_opts,index=_idx,
+                                        label_visibility="collapsed",key="scan_mode_radio")
+            # Simpan ke session_state setiap render
+            st.session_state.ss_scan_mode     = _scan_mode_val
+            st.session_state.ss_auto_regime   = auto_regime_tog
             tele_on=st.toggle("📡 Telegram Alert",value=True,key="tele_on")
+
         with sc2:
             st.markdown('<div class="settings-label">TIMEFRAME & FILTER</div>',unsafe_allow_html=True)
-            tf_options = ["15m","1h","4h"] if scan_mode!="Bagger 💎" else ["1d"]
-            is_bagger  = (scan_mode=="Bagger 💎")
-            if is_bagger:
-                scan_tf="1d"
-                st.markdown('<div style="font-size:10px;color:#bf5fff;padding:6px;background:rgba(191,95,255,.1);border-radius:4px;">📅 Bagger: Daily TF otomatis</div>',unsafe_allow_html=True)
+            _is_bag_setting = (_scan_mode_val=="Bagger 💎")
+            if _is_bag_setting:
+                _scan_tf_val="1d"
+                st.markdown('<div style="font-size:10px;color:#bf5fff;padding:6px;'
+                            'background:rgba(191,95,255,.1);border-radius:4px;">'
+                            '📅 Bagger: Daily TF otomatis</div>',unsafe_allow_html=True)
             else:
-                _prev_tf=st.session_state.get("active_tf","15m")
+                _prev_tf=st.session_state.get("ss_scan_tf","15m")
                 _tf_opts=["15m","1h","4h"]
                 _tf_idx=_tf_opts.index(_prev_tf) if _prev_tf in _tf_opts else 0
-                scan_tf=st.radio("Timeframe",_tf_opts,index=_tf_idx,horizontal=True,key="scan_tf")
-            # Persist tf ke session_state
-            st.session_state.active_tf=scan_tf
+                _scan_tf_val=st.radio("Timeframe",_tf_opts,index=_tf_idx,
+                                      horizontal=True,key="scan_tf_radio")
+            st.session_state.ss_scan_tf = _scan_tf_val
+
             auto_thresh=st.toggle("🤖 Auto-Threshold",value=True,key="auto_thr")
             if auto_thresh:
-                min_score=rcfg["min_score"]; vol_thresh=rcfg["min_rvol"]
-                st.caption(f"Auto: Score≥{min_score} · RVOL≥{vol_thresh}x")
+                _min_score_val  = rcfg["min_score"]
+                _vol_thresh_val = rcfg["min_rvol"]
+                st.caption(f"Auto: Score≥{_min_score_val} · RVOL≥{_vol_thresh_val}x")
             else:
-                min_score=st.slider("Min Score",0,6,4,key="msc")
-                vol_thresh=st.slider("Min RVOL",1.0,5.0,1.5,0.1,key="vol")
+                _min_score_val  = st.slider("Min Score",0,6,4,key="msc")
+                _vol_thresh_val = st.slider("Min RVOL",1.0,5.0,1.5,0.1,key="vol")
+            st.session_state.ss_min_score   = _min_score_val
+            st.session_state.ss_vol_thresh  = _vol_thresh_val
+            st.session_state.ss_auto_thresh = auto_thresh
+
         with sc3:
             st.markdown('<div class="settings-label">PASANGAN & TAMPILAN</div>',unsafe_allow_html=True)
-            view_mode=st.radio("View",["Card View 🃏","Table View 📊"],label_visibility="collapsed",key="view_mode")
-            min_vol_idr=st.number_input("Min Vol 24h (Juta IDR)",value=100,step=50,key="min_vol")*1_000_000
-            quick_mode=st.toggle("⚡ Quick Scan (Top 50)",value=False,key="quick_mode")
-            if is_bagger:
-                st.markdown('<div style="font-size:9px;color:#bf5fff;">📅 Bagger pakai Daily TF · Wyckoff 20 hari</div>',unsafe_allow_html=True)
+            view_mode   = st.radio("View",["Card View 🃏","Table View 📊"],
+                                   label_visibility="collapsed",key="view_mode")
+            _min_vol_val= st.number_input("Min Vol 24h (Juta IDR)",value=100,
+                                          step=50,key="min_vol")*1_000_000
+            quick_mode  = st.toggle("⚡ Quick Scan (Top 50)",value=False,key="quick_mode")
+            st.session_state.ss_min_vol   = _min_vol_val
+            st.session_state.ss_quick     = quick_mode
+            if _is_bag_setting:
+                st.markdown('<div style="font-size:9px;color:#bf5fff;">'
+                            '📅 Bagger pakai Daily TF · Wyckoff 20 hari</div>',
+                            unsafe_allow_html=True)
 
     do_scan=st.button("🔥 SCAN SEKARANG",type="primary",use_container_width=True,key="btn_scan")
 
-    # Auto-refresh 5 menit
+    # ── Auto-refresh 5 menit ──
     _now_chk=now_wib.timestamp()
     auto_triggered=False
     if st.session_state.last_scan_time and not do_scan:
         _el=_now_chk-st.session_state.last_scan_time
         if _el>=300 and st.session_state.scan_results:
             do_scan=True; auto_triggered=True
-            # Restore mode & tf dari session_state — CRITICAL untuk auto refresh
-            scan_mode=st.session_state.get("active_scan_mode", scan_mode)
-            scan_tf  =st.session_state.get("active_tf", "15m")
 
     if do_scan:
-        all_pairs=get_idr_pairs()
-        # Quick mode: top 50 by name (BTC, ETH, BNB biasanya di atas)
-        scan_pairs=all_pairs[:50] if quick_mode else all_pairs
-        n_pairs=len(scan_pairs)
-        is_bagger_scan=(scan_mode=="Bagger 💎")
-        tf_scan="1d" if is_bagger_scan else scan_tf
-        min_bars=20 if is_bagger_scan else 55
+        # ── Baca SEMUA setting dari session_state — sumber kebenaran tunggal ──
+        scan_mode   = st.session_state.get("ss_scan_mode",   rcfg["mode"])
+        scan_tf     = st.session_state.get("ss_scan_tf",     "15m")
+        min_score   = st.session_state.get("ss_min_score",   rcfg["min_score"])
+        vol_thresh  = st.session_state.get("ss_vol_thresh",  rcfg["min_rvol"])
+        min_vol_idr = st.session_state.get("ss_min_vol",     100_000_000)
+        quick_mode  = st.session_state.get("ss_quick",       False)
+
+        all_pairs   = get_idr_pairs()
+        scan_pairs  = all_pairs[:50] if quick_mode else all_pairs
+        n_pairs     = len(scan_pairs)
+        is_bagger_scan = (scan_mode=="Bagger 💎")
+        tf_scan     = "1d" if is_bagger_scan else scan_tf
+        min_bars    = 20 if is_bagger_scan else 55
 
         prog_ph=st.empty(); pb=st.progress(0)
         label="🔄 AUTO-REFRESH" if auto_triggered else "🔥 SCANNING"
@@ -951,7 +990,8 @@ with tab_scanner:
                 roc_c="#00ff88" if row["ROC 3%"]>0 else "#ff3d5a"
                 te="📈" if "▲" in row["Trend"] else("📉" if "▼" in row["Trend"] else "➡️")
                 sig_c="#bf5fff" if is_bag else("#00ff88" if sc_int>=5 else "#ffb700" if sc_int>=4 else "#00e5ff")
-                tf_b=f'<span style="font-size:8px;color:{"#bf5fff" if row["TF"]=="1d" else "#4a5568"};">[{row["TF"]}]</span>'
+                _tf_c="#bf5fff" if row["TF"]=="1d" else "#4a5568"
+                tf_b=f'<span style="font-size:8px;color:{_tf_c};">[{row["TF"]}]</span>'
                 card_html+=f"""<div class="signal-card {row['_class']}">
                   <div style="display:flex;justify-content:space-between;align-items:flex-start;">
                     <div><div class="sc-ticker">{row['Coin']} {tf_b}</div>
@@ -1102,9 +1142,9 @@ with tab_watchlist:
                 ch+=f'<div class="signal-card"><div class="sc-ticker">{row["Coin"]}</div><div style="font-size:11px;color:#4a5568;margin-top:6px;">{row.get("Signal","No data")}</div></div>'
                 continue
             sc_int=int(row["Score"]); bars="".join([f'<div class="sc-bar {"filled" if i<sc_int else "empty"}" style="width:24px"></div>' for i in range(6)])
-            sig=row.get("Signal","-"); is_bag="BAGGER" in sig or "KANDIDAT" in sig
-            sc_col="#bf5fff" if is_bag else("#00ff88" if "GACOR" in sig or "REVERSAL" in sig else "#ffb700" if "POTENSIAL" in sig else "#00e5ff" if "WATCH" in sig else "#4a5568")
-            rsi_v=row["RSI-EMA"]; rsi_c="#ff3d5a" if rsi_v<30 else("#ffb700" if rsi_v<45 else "#00ff88" if rsi_v>60 else "#c9d1d9")
+            _bar_parts=(['<div class="sc-bar filled" style="width:24px"></div>']*sc_int +
+                        ['<div class="sc-bar empty"  style="width:24px"></div>']*(6-sc_int))
+            bars="".join(_bar_parts)
             roc_c="#00ff88" if row.get("ROC 3%",0)>0 else "#ff3d5a"
             te="📈" if "▲" in row["Trend"] else("📉" if "▼" in row["Trend"] else "➡️")
             fr_v=row.get("FR","N/A")
@@ -1200,7 +1240,7 @@ with tab_market:
           <div style="margin-top:10px;height:6px;background:#1c2533;border-radius:3px;overflow:hidden;">
             <div style="width:{btc_dom if btc_dom else 50}%;height:100%;background:var(--btc);border-radius:3px;"></div>
           </div>
-          <div style="font-size:9px;color:#4a5568;margin-top:3px;">BTC {btc_dom_str} · Alt {f"{100-btc_dom:.1f}%" if btc_dom else "N/A"}</div>
+          <div style="font-size:9px;color:#4a5568;margin-top:3px;">BTC {btc_dom_str} · Alt {alt_dom_str}</div>
         </div>""", unsafe_allow_html=True)
 
     st.markdown('<div class="section-title" style="margin-top:20px;">Funding Rate — Sentiment SPOT Trader</div>',unsafe_allow_html=True)
@@ -1210,16 +1250,20 @@ with tab_market:
     </div>""", unsafe_allow_html=True)
 
     if fr_data:
-        fr_cols=st.columns(len(fr_data))
-        for idx,(coin,data) in enumerate(fr_data.items()):
-            rate=data["rate"]
-            lbl,col=fr_label(rate)
+        fr_cols = st.columns(min(len(fr_data), 5))
+        for idx, (coin, data) in enumerate(list(fr_data.items())[:5]):
+            _rate = data.get("rate", 0)
+            _lbl, _col = fr_label(_rate)
+            _lbl_short = _lbl.split("—")[0].strip()
             with fr_cols[idx]:
-                st.markdown(f"""<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
-                  <div style="font-family:Space Mono,monospace;font-size:12px;font-weight:700;color:#c9d1d9;">{coin}</div>
-                  <div style="font-family:Space Mono,monospace;font-size:20px;font-weight:700;color:{col};margin:6px 0;">{rate:+.4f}%</div>
-                  <div style="font-size:9px;color:{col};">{lbl.split("—")[0].strip()}</div>
-                </div>""", unsafe_allow_html=True)
+                st.markdown(
+                    f'<div style="background:var(--surface);border:1px solid var(--border);'
+                    f'border-radius:8px;padding:12px;text-align:center;">' 
+                    f'<div style="font-family:Space Mono,monospace;font-size:12px;font-weight:700;color:#c9d1d9;">{coin}</div>'
+                    f'<div style="font-family:Space Mono,monospace;font-size:20px;font-weight:700;color:{_col};margin:6px 0;">{_rate:+.4f}%</div>'
+                    f'<div style="font-size:9px;color:{_col};">{_lbl_short}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True)
     else:
         st.info("Funding rate tidak tersedia — cek koneksi Binance API")
 
