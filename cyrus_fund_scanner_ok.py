@@ -1,6 +1,11 @@
 import ccxt
 import pandas as pd
 import streamlit as st
+try:
+    from streamlit_autorefresh import st_autorefresh
+    _HAS_AUTOREFRESH = True
+except ImportError:
+    _HAS_AUTOREFRESH = False
 import requests
 import numpy as np
 import pytz
@@ -25,6 +30,11 @@ for _k, _v in [
 
 st.set_page_config(layout="wide", page_title="Crypto Turbo", page_icon="🚀",
                    initial_sidebar_state="collapsed")
+
+# Auto-refresh: cek setiap 60 detik, scan trigger saat elapsed >= 300s
+if _HAS_AUTOREFRESH:
+    _ar_count = st_autorefresh(interval=60_000, limit=None, key="auto_refresh_timer")
+
 
 st.markdown("""
 <style>
@@ -968,9 +978,10 @@ with tab_scanner:
                 time.sleep(_ex2.rateLimit/1000*0.3)
             _fb_ph.empty()
 
-        st.session_state.scan_results=results
-        st.session_state.last_scan_time=now_wib.timestamp()
-        st.session_state.last_scan_mode=scan_mode
+        st.session_state.scan_results   = results
+        st.session_state.last_scan_time  = now_wib.timestamp()
+        st.session_state.last_scan_mode  = scan_mode
+        st.session_state.last_scan_tf    = tf_scan
 
         if tele_on and results:
             send_telegram(sorted(results,key=lambda x:x["Score"],reverse=True)[:5])
@@ -982,6 +993,10 @@ with tab_scanner:
         st.caption(f"⏱️ Next: {int(_rem//60):02d}:{int(_rem%60):02d} · Last: {_last} WIB · {lm}")
 
     results=st.session_state.scan_results
+    if "tf_scan" not in dir():
+        tf_scan=st.session_state.get("last_scan_tf","15m")
+    _ss_qm=st.session_state.get("ss_quick",False)
+    _ss_sm=st.session_state.get("ss_scan_mode",rcfg["mode"])
     if not results and not do_scan:
         st.markdown(f"""
         <div style="text-align:center;padding:48px;color:#4a5568;font-family:Space Mono,monospace;">
@@ -1467,9 +1482,6 @@ st.markdown(f"""
   <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;">{time_info}</div>
 </div>""", unsafe_allow_html=True)
 
-# Auto-rerun
-if st.session_state.last_scan_time:
-    if _now_f-st.session_state.last_scan_time>=295:
-        time.sleep(5)
-        st.rerun()
+# Auto-rerun handled by streamlit-autorefresh di atas
+# st.rerun() manual dihapus — tidak efektif tanpa interaksi user
 
