@@ -1146,7 +1146,7 @@ def fetch_intraday(tickers, interval="15m"):
 
 def send_telegram(results_top, source="Scanner"):
     if not TOKEN or not CHAT_ID: return False
-    now=datetime.now(et_tz); is_open=True  # crypto 24/7; sep="━"*28
+    now=datetime.now(et_tz); is_open=True; sep="━"*28  # crypto 24/7
     # Bener-bener evaluate conditional di f-string (bukan {{}})
     market_status="🔴 MARKET OPEN" if is_open else "🌙 AFTER HOURS"
     alert_type="WATCHLIST" if source=="Watchlist" else "SCANNER"
