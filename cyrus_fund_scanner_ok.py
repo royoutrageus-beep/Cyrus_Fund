@@ -557,7 +557,7 @@ button[data-testid="baseButton-primary"]{background:var(--orange)!important;colo
 # ════════════════════════════════════════════════════
 #  STOCK LIST
 # ════════════════════════════════════════════════════
-CRYPTO_TICKERS = [
+raw_stocks = [
     # --- NEW CRYPTO ---
     "XAUT-USD","PAXG-USD","DEXE-USD","APT-USD","FARTCOIN-USD","GOMINING-USD","GLM-USD","JELLYJELLY-USD","DGB-USD",    
     "T-USD","MASK-USD","OSMO-USD","SKL-USD","LSK-USD","AVA-USD","ADX-USD","COS-USD","MORPHO-USD","OPEN-USD","HOLO-USD","MOG-USD","LINEA-USD","AVNT-USD",
