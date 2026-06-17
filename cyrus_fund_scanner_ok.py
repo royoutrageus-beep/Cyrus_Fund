@@ -253,18 +253,32 @@ def _fetch_yf_ticker(ticker_yf, period="7d", interval="15m"):
     return None
 
 def _fetch_yf_parallel(tickers_yf, period="7d", interval="15m", workers=4, delay=(0.2, 0.5)):
-    """Parallel fetch — workers=4 + shuffle + delay.
-    Fewer workers = less chance of simultaneous rate-limit trigger.
+    """Parallel fetch — shuffle + per-ticker jitter.
+
+    Catatan presisi/kecepatan:
+    - workers lebih kecil agar minim rate-limit
+    - delay jitter tetap ada
     """
     results = {}; lock = threading.Lock()
-    shuffled = list(tickers_yf); random.shuffle(shuffled)
+    shuffled = list(tickers_yf)
+    random.shuffle(shuffled)
+
     def _one(t):
         time.sleep(random.uniform(*delay))
         df = _fetch_yf_ticker(t, period, interval)
         if df is not None:
-            with lock: results[t] = df
+            with lock:
+                results[t] = df
+
+    # jalan tanpa map() agar error per thread lebih kebaca
     with ThreadPoolExecutor(max_workers=workers) as exe:
-        list(exe.map(_one, shuffled))
+        futs = [exe.submit(_one, t) for t in shuffled]
+        for f in as_completed(futs):
+            try:
+                f.result()
+            except:
+                pass
+
     return results
 
 # ════════════════════════════════════════════════════
@@ -596,6 +610,7 @@ raw_stocks = [
     "OG-USD","ATM-USD","BAR-USD","PORTO-USD","LAZIO-USD","CITY-USD","ACM-USD",
     # --- STABLECOINS ---
     "USDT-USD","USDC-USD","USTC-USD","USDP-USD",]
+    
 seen=set(); raw_stocks=[x for x in raw_stocks if not(x in seen or seen.add(x))]
 stocks_yf=list(raw_stocks)  # US: no suffix needed
 stock_map={s:s for s in raw_stocks}  # US: identity map
@@ -1315,7 +1330,8 @@ with tab_scanner:
             missing_yf=[t for t in ticker_list if t not in data_dict]
             if missing_yf:
                 prog_ph.markdown(f'<div style="color:#ffb700;font-family:Space Mono,monospace;font-size:11px;">📊 yFinance fallback: {len(missing_yf)} ticker → Ticker().history() parallel...</div>',unsafe_allow_html=True)
-                yf_fetched=_fetch_yf_parallel(missing_yf,"5d","15m",workers=6)
+                # batasi workers untuk mengurangi rate-limit
+                yf_fetched=_fetch_yf_parallel(missing_yf,"5d","15m",workers=4)
                 for t_yf,df_yf in yf_fetched.items():
                     if df_yf is not None and len(df_yf)>=20:
                         data_dict[t_yf]=df_yf
@@ -1369,7 +1385,8 @@ with tab_scanner:
             # yFinance daily fallback — Ticker().history() parallel, no rate limit!
             missing_daily=[t for t in list(data_dict.keys()) if t not in daily_dict]
             if missing_daily:
-                yf_daily=_fetch_yf_parallel(missing_daily,"60d","1d",workers=4)
+                # batasi workers untuk mengurangi peluang rate-limit
+                yf_daily=_fetch_yf_parallel(missing_daily,"60d","1d",workers=3)
                 for t_d,df_d in yf_daily.items():
                     if df_d is not None and len(df_d)>=2:
                         daily_dict[t_d]=df_d
@@ -1422,8 +1439,14 @@ with tab_scanner:
                         except:
                             turnover=close*max(vol,0); gain_pct=float(r.get("ROC3",0))*100
                     rvol_raw=float(r["RVOL"]) if not np.isnan(float(r["RVOL"])) else 1.0
+                    # RVOL kadang NaN/inf → fallback aman
+                    if not np.isfinite(rvol_raw) or rvol_raw<=0:
+                        rvol_raw=1.0
                     rvol=rvol_raw
-                    if turnover<min_turn or rvol<vol_thresh: skip_reasons["turnover"]+=1; continue
+                    # threshold biaya/rvol
+                    if turnover<min_turn or rvol<vol_thresh:
+                        skip_reasons["turnover"]+=1
+                        continue
                     if scan_mode=="Scalping ⚡":   sc,reasons,_=score_scalping(r,p,p2)
                     elif scan_mode=="Momentum 🚀": sc,reasons,_=score_momentum(r,p,p2)
                     elif scan_mode=="Bagger 💎":   sc,reasons,_=score_bagger(r,p,p2,df)
@@ -2137,17 +2160,32 @@ with tab_trail:
 # ════ TAB BACKTEST ════
 with tab_backtest:
     st.markdown('<div class="section-title">Backtest Engine · 15M Intraday</div>',unsafe_allow_html=True)
+
+    # --- New: precision-oriented backtest controls (fee+slippage, unbiased sampling) ---
+    bt0a,bt0b = st.columns([2,1])
+    with bt0a:
+        bt_fee = st.number_input("Fee (bps per side)", value=5.0, step=1.0, min_value=0.0, max_value=100.0, key="bt_fee")
+        bt_slip = st.number_input("Slippage (bps)", value=3.0, step=1.0, min_value=0.0, max_value=100.0, key="bt_slip")
+    with bt0b:
+        bt_seed = st.number_input("Sample seed", value=42, step=1, min_value=0, max_value=10_000, key="bt_seed")
+
     bt1,bt2,bt3,bt4=st.columns(4)
     bt_mode=bt1.selectbox("Mode",["Scalping ⚡","Momentum 🚀","Reversal 🎯","Bagger 💎"],key="bt_mode")
     bt_sc=bt2.slider("Min Score",0,6,4,key="bt_sc")
     bt_fwd=int(bt3.number_input("Hold (bars)",value=4,step=1,min_value=1,max_value=20))
     bt_sl=bt4.number_input("SL mult (x ATR)",value=0.8,step=0.1,min_value=0.1,max_value=3.0)
     st.caption(f"Hold {bt_fwd} bars × 15 min = ~{bt_fwd*15} menit per trade")
+
     if st.button("🚀 Run Backtest",type="primary",key="bt_run"):
         dd=st.session_state.get("data_dict",{})
         if not dd: st.warning("Jalankan Scanner dulu bro!")
         else:
-            bt_r=[]; bpb=st.progress(0); sample=list(dd.keys())[:80]
+            bt_r=[]; bpb=st.progress(0)
+            sample_keys=list(dd.keys())
+            # unbiased sampling: shuffle with seed, then take 80
+            rng=random.Random(int(bt_seed))
+            rng.shuffle(sample_keys)
+            sample=sample_keys[:80]
             for bi,ty in enumerate(sample):
                 bpb.progress((bi+1)/len(sample))
                 try:
@@ -2165,11 +2203,21 @@ with tab_backtest:
                         if bt_mode=="Bagger 💎": tp2=en+3.0*av; sl2=en-1.0*av
                         else: tp2=en+2.0*av; sl2=en-bt_sl*av
                         ex=float(d.iloc[ii+bt_fwd]["Close"])
+                        # execution simulation: hit TP/SL using bar extremes, then apply fee+slippage
                         for fi in range(1,bt_fwd+1):
                             bar=d.iloc[ii+fi]
                             if float(bar["High"])>=tp2: ex=tp2; break
                             if float(bar["Low"])<=sl2:  ex=sl2; break
-                        bt_r.append((ex-en)/en*100)
+
+                        # apply costs: fee bps per side + slippage bps (entry & exit)
+                        fee_rate = float(bt_fee) / 10000.0  # bps->rate (per side)
+                        slip_rate = float(bt_slip) / 10000.0
+                        entry_cost = 1.0 - fee_rate - slip_rate
+                        exit_cost  = 1.0 - fee_rate - slip_rate
+                        en_eff = en * entry_cost
+                        ex_eff = ex * exit_cost
+
+                        bt_r.append((ex_eff-en_eff)/max(en_eff,1e-9)*100)
                 except: continue
             bpb.empty()
             if not bt_r: st.warning("Tidak ada trades. Turunkan Min Score.")
