@@ -1444,10 +1444,35 @@ with tab_scanner:
                         rvol_raw=1.0
                     rvol=rvol_raw
                     # threshold biaya/rvol
-                    if turnover<min_turn or rvol<vol_thresh:
+                    # Turnover dulu (selalu pakai). RVOL bisa NaN/inf → fallback aman,
+                    # supaya screening tidak kosong.
+                    if turnover<min_turn:
                         skip_reasons["turnover"]+=1
                         continue
+
+                    # RVOL NaN/inf/<=0 -> set default 1.0 (anggap netral)
+                    if not np.isfinite(rvol) or rvol<=0:
+                        rvol = 1.0
+
+                    # Pakai RVOL threshold kalau RVOL valid.
+                    if np.isfinite(rvol) and rvol < vol_thresh:
+                        skip_reasons["turnover"]+=1
+                        continue
+
+                    # ceiling untuk turnover (khusus mode Non-Liquid)
+                    # NOTE: saat ini UI FILTER belum ada toggle Non-Liquid di file ini,
+                    # jadi max_turn belum tentu terdefinisi. Amankan dulu agar tidak crash.
+                    try:
+                        _mt = max_turn
+                    except NameError:
+                        _mt = None
+                    if _mt is not None and turnover>_mt:
+                        skip_reasons["turnover"]+=1
+                        continue
+
+
                     if scan_mode=="Scalping ⚡":   sc,reasons,_=score_scalping(r,p,p2)
+
                     elif scan_mode=="Momentum 🚀": sc,reasons,_=score_momentum(r,p,p2)
                     elif scan_mode=="Bagger 💎":   sc,reasons,_=score_bagger(r,p,p2,df)
                     else:                          sc,reasons,_=score_reversal(r,p,p2)
