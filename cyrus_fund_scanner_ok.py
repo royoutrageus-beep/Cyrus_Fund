@@ -188,18 +188,13 @@ def fetch_ds_ohlcv(ticker, interval="15m", limit=200, force_fresh=False):
 
 # ════════════════════════════════════════════════════
 #  YFINANCE ANTI-RATE-LIMIT ENGINE
-#  Ticker().history() = chart API = no rate limit ✅
-#  yf.download()      = bulk API  = rate limited ❌ (DIHAPUS)
-#  random.shuffle + delay = sopan ke Yahoo ✅
 # ════════════════════════════════════════════════════
 def _normalize_yf_df(df):
     """Normalize DataFrame dari yfinance — handle berbagai versi & MultiIndex."""
     if df is None or df.empty: return None
     try:
-        # Handle MultiIndex (yf.download multi-ticker)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        # Normalize column names
         df.columns = [str(c).strip().capitalize() for c in df.columns]
         rename_map = {"Adj close":"Close","Adj_close":"Close","Adjclose":"Close"}
         df = df.rename(columns=rename_map)
@@ -218,21 +213,12 @@ def _normalize_yf_df(df):
     except: return None
 
 def _fetch_yf_ticker(ticker_yf, period="7d", interval="15m"):
-    """
-    Single ticker fetch — 3-layer fallback untuk handle yfinance 1.x breaking changes.
-    Layer 1: Ticker().history()           — chart API, fastest
-    Layer 2: yf.download() single ticker  — bulk API fallback
-    Layer 3: Ticker().history(proxy=None) — explicit no-proxy
-    """
-    # ── Layer 1: Ticker().history() ─────────────────
     try:
         t = yf.Ticker(ticker_yf)
         df = t.history(period=period, interval=interval, auto_adjust=True, actions=False)
         result = _normalize_yf_df(df)
         if result is not None: return result
     except Exception: pass
-
-    # ── Layer 2: yf.download() single ticker ────────
     try:
         df = yf.download(
             ticker_yf, period=period, interval=interval,
@@ -241,24 +227,15 @@ def _fetch_yf_ticker(ticker_yf, period="7d", interval="15m"):
         result = _normalize_yf_df(df)
         if result is not None: return result
     except Exception: pass
-
-    # ── Layer 3: Ticker tanpa auto_adjust ───────────
     try:
         t = yf.Ticker(ticker_yf)
         df = t.history(period=period, interval=interval, auto_adjust=False, actions=False)
         result = _normalize_yf_df(df)
         if result is not None: return result
     except Exception: pass
-
     return None
 
 def _fetch_yf_parallel(tickers_yf, period="7d", interval="15m", workers=4, delay=(0.2, 0.5)):
-    """Parallel fetch — shuffle + per-ticker jitter.
-
-    Catatan presisi/kecepatan:
-    - workers lebih kecil agar minim rate-limit
-    - delay jitter tetap ada
-    """
     results = {}; lock = threading.Lock()
     shuffled = list(tickers_yf)
     random.shuffle(shuffled)
@@ -270,7 +247,6 @@ def _fetch_yf_parallel(tickers_yf, period="7d", interval="15m", workers=4, delay
             with lock:
                 results[t] = df
 
-    # jalan tanpa map() agar error per thread lebih kebaca
     with ThreadPoolExecutor(max_workers=workers) as exe:
         futs = [exe.submit(_one, t) for t in shuffled]
         for f in as_completed(futs):
@@ -283,9 +259,6 @@ def _fetch_yf_parallel(tickers_yf, period="7d", interval="15m", workers=4, delay
 
 # ════════════════════════════════════════════════════
 #  IDX QUANT — 151 TRADING STRATEGIES ENGINE
-#  Kakushadze & Serur (2018)
-#  Analisa DAILY untuk konfirmasi makro direction
-#  Combined dengan TT 15m untuk timing entry presisi
 # ════════════════════════════════════════════════════
 
 def _iq_sma(prices, n):
@@ -299,7 +272,6 @@ def _iq_ema(prices, n):
     return round(e, 2)
 
 def _iq_rsi(prices, n=14):
-    """Simple RSI untuk daily data — Strategy 3.14 ref."""
     if len(prices) < n + 1: return None
     deltas = [prices[i+1]-prices[i] for i in range(len(prices)-1)]
     gains = [d for d in deltas[-n:] if d > 0]
@@ -309,7 +281,6 @@ def _iq_rsi(prices, n=14):
     return round(100 - 100/(1 + ag/al), 1)
 
 def _iq_momentum(prices):
-    """Strategy 3.1 — Price Momentum: 1M/3M/6M returns."""
     n = len(prices); score = 50; signals = []
     if n >= 20:
         r = (prices[-1]-prices[-20])/prices[-20]*100
@@ -326,7 +297,6 @@ def _iq_momentum(prices):
     return {"score": min(100, max(0, score)), "signals": signals}
 
 def _iq_ma_signal(prices):
-    """Strategy 3.11/3.12/3.13 — EMA5/13/34 + SMA20/50 stack."""
     e5=_iq_ema(prices,5); e13=_iq_ema(prices,13); e34=_iq_ema(prices,34)
     s20=_iq_sma(prices,20); s50=_iq_sma(prices,50)
     score=50; label="MIXED"; signals=[]
@@ -346,7 +316,6 @@ def _iq_ma_signal(prices):
             "s20":s20,"s50":s50,"signals":signals}
 
 def _iq_bagger(momentum_score, ma_score, ma_label, vol_ann, prices):
-    """Strategy 3.7 + 3.3 — Bagger: near 52W low + dry vol + momentum."""
     score=0; signals=[]
     score += momentum_score/100*40
     if momentum_score>=60: signals.append("✓ Momentum kuat (3.1)")
@@ -367,7 +336,6 @@ def _iq_bagger(momentum_score, ma_score, ma_label, vol_ann, prices):
     return {"score":round(min(100,score),1),"signals":signals}
 
 def _iq_pivot_daily(df_d):
-    """Strategy 3.14 — Daily Pivot Point (H+L+C)/3."""
     try:
         if df_d is None or len(df_d)<2: return {}
         prev=df_d.iloc[-2]
@@ -379,10 +347,6 @@ def _iq_pivot_daily(df_d):
     except: return {}
 
 def iq_analyze(df_daily):
-    """
-    Jalankan analisa IDX Quant 151 Strategies pada daily DataFrame.
-    Returns dict dengan iq_score, iq_verdict, iq_ma, iq_bagger, dll.
-    """
     empty = {"iq_score":0,"iq_verdict":"UNKNOWN","iq_mom":0,"iq_ma":"—",
              "iq_bagger":0,"iq_rsi":None,"iq_pivot":{},"iq_signals":[]}
     if df_daily is None or len(df_daily) < 10: return empty
@@ -390,7 +354,6 @@ def iq_analyze(df_daily):
         prices  = [float(x) for x in df_daily["Close"].tolist() if x>0]
         if len(prices) < 10: return empty
 
-        # Volatility annualized
         vol_ann = None
         if len(prices) >= 21:
             rets = [(prices[i+1]-prices[i])/prices[i] for i in range(len(prices)-21,len(prices)-1)]
@@ -404,9 +367,7 @@ def iq_analyze(df_daily):
         rsi = _iq_rsi(prices)
         pv  = _iq_pivot_daily(df_daily)
 
-        # Composite score: Momentum 40% + MA 35% + Bagger 25%
         comp = round(mom["score"]*0.40 + ma["score"]*0.35 + bag["score"]*0.25, 1)
-        # Verdict threshold: BUY ≥55 (was 65), HOLD ≥40 (was 45) — biar align dgn reality
         verdict = "BUY" if comp>=55 else "HOLD" if comp>=40 else "WAIT"
 
         all_signals = mom["signals"] + ma["signals"][:2] + bag["signals"][:2]
@@ -418,20 +379,6 @@ def iq_analyze(df_daily):
     except: return empty
 
 def calc_mesin_grade(tt_score, tt_signal, iq_score, iq_verdict, iq_bagger):
-    """
-    ════ MESIN PRESISI GRADE ════
-    Gabungan TT 15m (timing) + IQ daily (direction).
-    Keduanya agree = high conviction signal.
-
-    SMART$ 🔵   = TT SMART$/HAKA/SUPER + IQ BUY      → SMART$ confirm
-    PRESISI 🎯  = TT GACOR/REVERSAL + IQ BUY         → strong entry NOW
-    BAGGER 💎   = TT BAGGER/KANDIDAT + IQ Bagger ≥ 60→ accumulation
-    KUAT ⚡     = TT POTENSIAL + IQ BUY, atau TT GACOR + IQ HOLD
-    MONITOR 👁️  = IQ BUY tapi TT belum sempurna
-    TT-ONLY 🔥  = TT signal kuat tapi IQ UNKNOWN (data daily kurang)
-    WATCH 👀    = TT moderate, IQ neutral/unknown
-    WAIT ❌     = tidak ada alignment
-    """
     is_tt_strong  = any(k in tt_signal for k in ["GACOR","REVERSAL"])
     is_tt_smart   = any(k in tt_signal for k in ["SMART$","HAKA","SUPER"])
     is_tt_bag     = any(k in tt_signal for k in ["BAGGER","KANDIDAT"])
@@ -441,7 +388,6 @@ def calc_mesin_grade(tt_score, tt_signal, iq_score, iq_verdict, iq_bagger):
     is_iq_hold    = iq_verdict == "HOLD"
     is_iq_unknown = iq_verdict == "UNKNOWN"
 
-    # Aligned with both confirmation
     if is_tt_smart and is_iq_buy:
         return "SMART$ 🔵", "#4da6ff", min(100, tt_score/6*50 + iq_score/100*50 + 22)
     if is_tt_strong and is_iq_buy:
@@ -453,7 +399,6 @@ def calc_mesin_grade(tt_score, tt_signal, iq_score, iq_verdict, iq_bagger):
     if is_tt_strong and is_iq_hold:
         return "KUAT ⚡", "#ffb700", min(100, tt_score/6*50 + iq_score/100*50 + 8)
 
-    # TT-only grades (IQ UNKNOWN/missing - sering kejadian utk gorengan baru listing)
     if is_iq_unknown:
         if is_tt_smart:  return "SMART$ 🔵", "#4da6ff", min(100, tt_score/6*70 + 15)
         if is_tt_strong: return "TT-ONLY 🔥", "#ff7b00", min(100, tt_score/6*70 + 12)
@@ -461,7 +406,6 @@ def calc_mesin_grade(tt_score, tt_signal, iq_score, iq_verdict, iq_bagger):
         if is_tt_mod:    return "KUAT ⚡",   "#ffb700", min(100, tt_score/6*70 + 5)
         if is_tt_watch:  return "WATCH 👀",  "#00e5ff", min(60, tt_score/6*60)
 
-    # Other partial alignment
     if is_iq_buy and (is_tt_strong or is_tt_mod or is_tt_smart):
         return "MONITOR 👁️", "#00e5ff", tt_score/6*50 + iq_score/100*50
     if (is_tt_strong or is_tt_smart) and is_iq_hold:
@@ -615,11 +559,24 @@ seen=set(); raw_stocks=[x for x in raw_stocks if not(x in seen or seen.add(x))]
 stocks_yf=list(raw_stocks)  # US: no suffix needed
 stock_map={s:s for s in raw_stocks}  # US: identity map
 
+# ════════════════════════════════════════════════════
+#  LIQUIDITY TIER — major coin (liquid) vs microcap (non-liquid)
+# ════════════════════════════════════════════════════
+LIQUID_MAJORS = {
+    "BTC-USD","ETH-USD","SOL-USD","BNB-USD","XRP-USD","ADA-USD","DOGE-USD","TRX-USD",
+    "LINK-USD","AVAX-USD","DOT-USD","TON-USD","MATIC-USD","POL-USD","LTC-USD","BCH-USD",
+    "UNI-USD","ATOM-USD","NEAR-USD","ICP-USD","APT-USD","SUI-USD","HBAR-USD","XLM-USD",
+    "FIL-USD","ARB-USD","OP-USD","INJ-USD","TIA-USD","SHIB-USD","PEPE-USD","WIF-USD",
+    "BONK-USD","TAO-USD","RUNE-USD","AAVE-USD","MKR-USD","CRV-USD","GRT-USD","SEI-USD",
+    "PENDLE-USD","ENA-USD","WLD-USD","STRK-USD","JASMY-USD","FLOKI-USD","ORDI-USD",
+    "USDT-USD","USDC-USD","FDUSD-USD","PYUSD-USD","DAI-USD",
+}
+
 # ════ MARKET REGIME — pakai Ticker().history() ════
 @st.cache_data(ttl=300)
 def get_market_regime():
     try:
-        df = _fetch_yf_ticker("BTC-USD", "60d", "1d")  # ← no yf.download!
+        df = _fetch_yf_ticker("BTC-USD", "60d", "1d")
         if df is None or len(df) < 10:
             return ("UNKNOWN", 0, 0, 0, "Data BTC kurang", 0.0)
         close = df["Close"].dropna()
@@ -648,7 +605,6 @@ def get_market_regime():
         return ("UNKNOWN", 0, 0, 0, f"BTC error: {str(e)[:40]}", 0.0)
 
 def get_regime_config(regime):
-    # Crypto: volatility 2-5x lebih tinggi, SL wider, threshold tetap match dengan kondisi
     return {
         "RED":     {"mode":"Reversal 🎯","min_score":3,"min_rvol":1.2,"sl_mult":1.0,
                     "label":"🔴 BTC BEARISH — Altcoin Reversal Hunt, Score ≥ 3","color":"#ff3d5a",
@@ -663,11 +619,35 @@ def get_regime_config(regime):
                     "label":"⚪ REGIME UNKNOWN — Manual Mode","color":"#4a5568","desc":""},
     }.get(regime,{"mode":"Scalping ⚡","min_score":2,"min_rvol":1.0,"sl_mult":1.0,"label":"⚪","color":"#4a5568","desc":""})
 
+# ════════════════════════════════════════════════════
+#  LIQUIDITY PRESET — Liquid / Semua / Non-Liquid
+#  min_turn_m : turnover floor (juta USD)
+#  max_turn_m : turnover ceiling (juta USD) — None = no ceiling
+#  min_rvol   : RVOL floor untuk mode ini
+# ════════════════════════════════════════════════════
+def get_liquidity_preset(liq_mode, regime_rvol):
+    LIQ = {
+        "💧 Liquid":    {"min_turn_m":5.0, "max_turn_m":None, "min_rvol":max(1.2, regime_rvol),
+                         "cap":"Major coin · turnover ≥ $5M · RVOL normal"},
+        "🌊 Semua":     {"min_turn_m":0.0, "max_turn_m":None, "min_rvol":1.0,
+                         "cap":"Semua coin masuk scoring · filter cuma Score"},
+        "🔥 Non-Liquid":{"min_turn_m":0.0, "max_turn_m":5.0,  "min_rvol":1.0,
+                         "cap":"Microcap/gorengan · turnover < $5M · gerak liar"},
+    }
+    return LIQ.get(liq_mode, LIQ["🌊 Semua"])
+
+def liq_tier(ticker, turnover_usd):
+    """Klasifikasi coin: LIQUID kalau di whitelist major ATAU turnover ≥ $5M."""
+    t = str(ticker).upper()
+    if t in LIQUID_MAJORS: return "LIQUID"
+    if turnover_usd is not None and turnover_usd >= 5_000_000: return "LIQUID"
+    return "NONLIQ"
+
 # ════ PIVOT — pakai Ticker().history() ════
 @st.cache_data(ttl=3600)
 def fetch_pivot_data(ticker_yf):
     try:
-        df = _fetch_yf_ticker(ticker_yf, "5d", "1d")  # ← no yf.download!
+        df = _fetch_yf_ticker(ticker_yf, "5d", "1d")
         if df is None or len(df) < 2: return None
         prev=df.iloc[-2]; h=float(prev["High"]); l=float(prev["Low"]); c=float(prev["Close"])
         pp=(h+l+c)/3
@@ -687,7 +667,6 @@ def get_pivot_position(price, pivots):
 # ════ SECTOR — pakai _fetch_yf_parallel ════
 @st.cache_data(ttl=300)
 def fetch_sector_rotation(sector_stocks):
-    """Parallel Ticker().history() — no yf.download(), no rate limit."""
     tickers_yf = list(sector_stocks[:10])
     raw = _fetch_yf_parallel(tickers_yf, "3d", "1d", workers=5)
     results = []
@@ -704,7 +683,6 @@ def fetch_sector_rotation(sector_stocks):
 # ════ GAP UP — pakai _fetch_yf_parallel ════
 @st.cache_data(ttl=300)
 def scan_gap_up(tickers_yf, min_gap_pct=0.5):
-    """Parallel Ticker().history() — no batched yf.download(), no rate limit."""
     raw = _fetch_yf_parallel(list(tickers_yf), "5d", "1d", workers=6)
     results = []
     for t, df in raw.items():
@@ -768,7 +746,6 @@ def apply_intraday_indicators(df):
     try:
         tp=(df["High"]+df["Low"]+df["Close"])/3
         df["VWAP"]=(tp*df["Volume"]).cumsum()/df["Volume"].cumsum()
-        # FIX: kalau volume cumsum = 0 (semua bar vol=0) → VWAP NaN → fill dengan Close
         df["VWAP"] = df["VWAP"].fillna(c)
     except: df["VWAP"]=c
     df["BB_mid"]=c.rolling(20).mean(); df["BB_std"]=c.rolling(20).std()
@@ -971,7 +948,6 @@ def score_bagger(r, p, p2, df_full):
     return max(0,min(6,round(score,1))),reasons,{"wyckoff_phase":wyckoff_phase}
 
 def get_signal(score, mode):
-    # Threshold diturunin biar low-score juga dapet label (gak WAIT)
     t={"Scalping ⚡":{5:"GACOR ⚡",   4:"POTENSIAL 🔥",3:"WATCH 👀",  2:"LEMAH 🟡",1:"MARGINAL 🔸"},
        "Momentum 🚀":{5:"GACOR 🚀",   4:"POTENSIAL 🔥",3:"WATCH 👀",  2:"LEMAH 🟡",1:"MARGINAL 🔸"},
        "Reversal 🎯":{5:"REVERSAL 🎯",4:"POTENSIAL 🔥",3:"WATCH 👀",  2:"LEMAH 🟡",1:"MARGINAL 🔸"},
@@ -1102,7 +1078,6 @@ def get_aksi_v2(sinyal, gc_now, score):
 # ════ FETCH INTRADAY — DS primary, yFinance fallback (anti-rate-limit) ════
 def fetch_intraday(tickers, interval="15m"):
     all_dfs={}; ticker_list=list(tickers)
-    # Step 1: cache first
     need_fetch=[]
     for t in ticker_list:
         raw_t=t.upper()
@@ -1110,7 +1085,6 @@ def fetch_intraday(tickers, interval="15m"):
         if cached is not None: all_dfs[t]=cached; continue
         need_fetch.append(t)
     if not need_fetch: return all_dfs
-    # Step 2: DS parallel (10 threads) — kalau DS_KEY ada
     if DS_KEY:
         def _fetch_one(t):
             raw_t=t.upper()
@@ -1124,8 +1098,6 @@ def fetch_intraday(tickers, interval="15m"):
                     if df is not None and len(df)>=20:
                         all_dfs[t]=df
                 except: pass
-    # Step 3: yFinance fallback — Ticker().history() parallel, no rate limit!
-    # Jalan untuk semua ticker yang masih missing (DS gagal atau DS_KEY kosong)
     missing_yf=[t for t in need_fetch if t not in all_dfs]
     if missing_yf:
         yf_data=_fetch_yf_parallel(missing_yf, "7d", interval, workers=5)
@@ -1136,13 +1108,12 @@ def fetch_intraday(tickers, interval="15m"):
 
 def send_telegram(results_top, source="Scanner"):
     if not TOKEN or not CHAT_ID: return False
-    now=datetime.now(et_tz); is_open=True; sep="━"*28  # crypto 24/7
-    # Bener-bener evaluate conditional di f-string (bukan {{}})
+    now=datetime.now(et_tz); is_open=True; sep="━"*28
     market_status="🔴 MARKET OPEN" if is_open else "🌙 AFTER HOURS"
     alert_type="WATCHLIST" if source=="Watchlist" else "SCANNER"
     hdr=(f"{market_status}\n⚡ *MESIN PRESISI CRYPTO {alert_type}*\n"
          f"⏰ `{now.strftime('%H:%M:%S')} ET` · `{now.strftime('%d %b %Y')}`\n{sep}\n")
-    body=""  # INIT! Sebelumnya gak diinit → UnboundLocalError
+    body=""
     for r in results_top[:8]:
         sig=r.get("Signal","-")
         mg=r.get("Mesin_Grade","—")
@@ -1152,7 +1123,9 @@ def send_telegram(results_top, source="Scanner"):
             else "🔥" if "POTENSIAL" in sig else "👀")
         te="📈" if "▲" in r.get("Trend","") else("📉" if "▼" in r.get("Trend","") else "➡️")
         iq_v=r.get("IQ_Verdict","—"); iq_s=r.get("IQ_Score",0)
-        body+=(f"\n{em} *{r['Ticker']}* `[{mg}]` MS:`{ms:.0f}`\n"
+        liq=r.get("Liq_Tier","")
+        liq_em=" 💧" if liq=="LIQUID" else " 🔥" if liq=="NONLIQ" else ""
+        body+=(f"\n{em} *{r['Ticker']}*{liq_em} `[{mg}]` MS:`{ms:.0f}`\n"
                f"   💰 `${_pf(r['Price'])}` {te} · TT:`{sig}`\n"
                f"   📊 IQ Daily: `{iq_v}` ({iq_s:.0f}/100)\n"
                f"   📈 RSI: `{r.get('RSI-EMA',0):.0f}` · RVOL: `{r.get('RVOL',0):.1f}x`\n"
@@ -1193,7 +1166,7 @@ HIGH_BETA_SECTORS=["Memecoin","AI Tokens","Gaming & Metaverse","New 2024-2025","
 regime, spx_price, ema20, ema55, regime_detail, spx_chg = get_market_regime()
 rcfg=get_regime_config(regime); rcolor=rcfg["color"]
 chg_col="#00ff88" if spx_chg>=0 else "#ff3d5a"; chg_sym="▲" if spx_chg>=0 else "▼"
-now_et=datetime.now(et_tz); is_open=True  # crypto 24/7
+now_et=datetime.now(et_tz); is_open=True
 
 st.markdown(f"""<div class="tt-header">
   <div><div class="tt-logo">⚡ MESIN PRESISI CRYPTO ₿</div>
@@ -1230,7 +1203,6 @@ with tab_scanner:
             else:
                 scan_mode=st.radio("Mode",["Scalping ⚡","Momentum 🚀","Reversal 🎯","Bagger 💎"],label_visibility="collapsed",key="smr")
             tele_on=st.toggle("📡 Telegram Alert",value=True,key="tele_on")
-            # Status TOKEN/CHAT_ID
             if tele_on:
                 if TOKEN and CHAT_ID:
                     st.caption(f"✅ TG ready · Token: ...{TOKEN[-8:]} · Chat: {CHAT_ID}")
@@ -1249,19 +1221,30 @@ with tab_scanner:
                     st.caption(f"⚠️ Missing: {', '.join(missing)} di secrets.toml")
         with sc2:
             st.markdown('<div class="settings-label">FILTER</div>',unsafe_allow_html=True)
+
+            # ─── LIQUIDITY MODE TOGGLE (NEW) ───────────────────────
+            liq_mode=st.radio("Likuiditas",["💧 Liquid","🌊 Semua","🔥 Non-Liquid"],
+                              index=1,horizontal=True,key="liq_mode",label_visibility="collapsed")
+            _lp=get_liquidity_preset(liq_mode, rcfg["min_rvol"])
+            st.caption(f"⚙️ {_lp['cap']}")
+
             auto_thresh=st.toggle("🤖 Auto-Threshold",value=True,key="auto_thr")
             if auto_thresh:
-                min_score=rcfg["min_score"]; vol_thresh=rcfg["min_rvol"]
-                st.caption(f"Auto: Score≥{min_score} · RVOL≥{vol_thresh}x")
+                min_score=rcfg["min_score"]
+                vol_thresh=_lp["min_rvol"]
+                st.caption(f"Auto: Score≥{min_score} · RVOL≥{vol_thresh:.1f}x")
             else:
                 min_score=st.slider("Min Score (0-6)",0,6,2,key="msc")
-                vol_thresh=st.slider("Min RVOL Spike",1.0,5.0,1.5,0.1,key="vol")
-            min_turn=st.number_input("Min Turnover (M USD)",value=1,step=1,key="trn")*1_000_000
+                vol_thresh=st.slider("Min RVOL Spike",0.0,5.0,float(_lp["min_rvol"]),0.1,key="vol")
+
+            _def_turn=int(_lp["min_turn_m"])
+            min_turn=st.number_input("Min Turnover (M USD)",value=_def_turn,step=1,key="trn")*1_000_000
+            max_turn=_lp["max_turn_m"]*1_000_000 if _lp["max_turn_m"] else None
         with sc3:
             st.markdown('<div class="settings-label">TAMPILAN</div>',unsafe_allow_html=True)
             view_mode=st.radio("View",["Card View 🃏","Table View 📊"],label_visibility="collapsed",key="vm")
             quick_mode=st.toggle("⚡ Quick (200 stocks)",value=False,key="quick_mode")
-            st.caption(f"🎯 Regime: {regime} · Mode: {scan_mode}")
+            st.caption(f"🎯 Regime: {regime} · Mode: {scan_mode} · Liq: {liq_mode}")
 
     _btn_c1, _btn_c2 = st.columns([3,1])
     with _btn_c1:
@@ -1277,12 +1260,11 @@ with tab_scanner:
                     st.success(f"✅ {_tk} → {len(_r)} rows, Close[-1]={float(_r['Close'].iloc[-1]):,.0f}")
                 else:
                     st.error(f"❌ {_tk} → GAGAL")
-            # test 15m
             _r15 = _fetch_yf_ticker("BTC-USD","5d","15m")
             if _r15 is not None:
-                st.success(f"✅ BBCA 15m → {len(_r15)} rows ✓")
+                st.success(f"✅ BTC-USD 15m → {len(_r15)} rows ✓")
             else:
-                st.error("❌ BBCA 15m → GAGAL — coba ganti requirements.txt: yfinance==0.2.61")
+                st.error("❌ BTC-USD 15m → GAGAL — coba ganti requirements.txt: yfinance==0.2.61")
     _now_check=now_et.timestamp(); auto_trigger=False
     if st.session_state.last_scan_time and not do_scan_btn:
         if _now_check-st.session_state.last_scan_time>=300 and st.session_state.scan_results:
@@ -1296,7 +1278,6 @@ with tab_scanner:
         data_dict={}
         try:
             ticker_list=list(scan_list)
-            # ─ Step 1: DS cache check ─
             need_fetch=[]
             for t in ticker_list:
                 raw_t=t.upper()
@@ -1306,7 +1287,6 @@ with tab_scanner:
             n_cached=len(data_dict); n_need=len(need_fetch)
             prog_ph.markdown(f'<div style="color:#ff7b00;font-family:Space Mono,monospace;font-size:11px;">⚡ {n_cached} dari cache · {n_need} perlu fetch...</div>',unsafe_allow_html=True)
 
-            # ─ Step 2: DS parallel fetch ─
             def _f(t):
                 raw_t=t.upper()
                 if DS_KEY:
@@ -1326,11 +1306,9 @@ with tab_scanner:
                                 pb.progress(min(pct,0.50))
                         except: done_count[0]+=1
 
-            # ─ Step 3: yFinance fallback — Ticker().history() PARALLEL, no rate limit ─
             missing_yf=[t for t in ticker_list if t not in data_dict]
             if missing_yf:
                 prog_ph.markdown(f'<div style="color:#ffb700;font-family:Space Mono,monospace;font-size:11px;">📊 yFinance fallback: {len(missing_yf)} ticker → Ticker().history() parallel...</div>',unsafe_allow_html=True)
-                # batasi workers untuk mengurangi rate-limit
                 yf_fetched=_fetch_yf_parallel(missing_yf,"5d","15m",workers=4)
                 for t_yf,df_yf in yf_fetched.items():
                     if df_yf is not None and len(df_yf)>=20:
@@ -1346,15 +1324,14 @@ with tab_scanner:
             if len(data_dict)==0:
                 st.error("⚠️ 0 stocks berhasil di-fetch. Lihat diagnostik di bawah.")
                 with st.expander("🔧 DIAGNOSTIK — klik untuk cek koneksi", expanded=True):
-                    st.code(f"yfinance version: {yf.__version__}\nPython workers: {4}\nTickers target: {len(ticker_list)}\nContoh ticker: {ticker_list[:3] if ticker_list else 'KOSONG!'}")
+                    st.code(f"yfinance version: {yf.__version__}\\nPython workers: {4}\\nTickers target: {len(ticker_list)}\\nContoh ticker: {ticker_list[:3] if ticker_list else 'KOSONG!'}")
                     st.caption("Test fetch BTC-USD...")
                     _test_df = _fetch_yf_ticker("BTC-USD", "5d", "1d")
                     if _test_df is not None:
                         st.success(f"✅ BTC-USD OK — {len(_test_df)} rows, cols: {_test_df.columns.tolist()}")
                         st.caption("yFinance bisa fetch data. Kemungkinan masalah di paralel. Coba SCAN lagi.")
                     else:
-                        st.error("❌ BTC-USD juga gagal! Cek:\n- Internet Streamlit Cloud OK?\n- Coba tambahkan `yfinance==0.2.61` di requirements.txt")
-                    # Test download() as last resort
+                        st.error("❌ BTC-USD juga gagal! Cek:\\n- Internet Streamlit Cloud OK?\\n- Coba tambahkan `yfinance==0.2.61` di requirements.txt")
                     try:
                         _td2 = yf.download("BTC-USD","5d","1d",progress=False,threads=False)
                         if not _td2.empty:
@@ -1366,7 +1343,6 @@ with tab_scanner:
                 st.stop()
             pb.progress(0.78)
 
-            # ─ Step 4: Daily context — DS dulu, yFinance fallback parallel ─
             daily_dict={}
             if DS_KEY:
                 def _fd(t):
@@ -1382,23 +1358,19 @@ with tab_scanner:
                             t,df=f.result(timeout=12)
                             if df is not None and len(df)>=2: daily_dict[t]=df
                         except: pass
-            # yFinance daily fallback — Ticker().history() parallel, no rate limit!
             missing_daily=[t for t in list(data_dict.keys()) if t not in daily_dict]
             if missing_daily:
-                # batasi workers untuk mengurangi peluang rate-limit
                 yf_daily=_fetch_yf_parallel(missing_daily,"60d","1d",workers=3)
                 for t_d,df_d in yf_daily.items():
                     if df_d is not None and len(df_d)>=2:
                         daily_dict[t_d]=df_d
             st.session_state.daily_dict=daily_dict
 
-            # ─ Step 5: Process signals ─
             pb.progress(0.85)
             prog_ph.markdown(f'<div style="color:#00ff88;font-family:Space Mono,monospace;font-size:11px;">⚙️ Processing {len(data_dict)} stocks...</div>',unsafe_allow_html=True)
             results=[]; tickers=list(data_dict.keys())
             daily_dict=st.session_state.get("daily_dict",{})
-            # Track skip reasons untuk debug
-            skip_reasons={"short":0,"price0":0,"turnover":0,"score":0,"error":0}
+            skip_reasons={"short":0,"price0":0,"turnover":0,"liq_ceiling":0,"score":0,"error":0}
             last_err=[""]
             for i,ticker_yf in enumerate(tickers):
                 pb.progress(0.85+(i+1)/max(len(tickers),1)*0.14)
@@ -1407,7 +1379,6 @@ with tab_scanner:
                     if len(df)<30: skip_reasons["short"]+=1; continue
                     df=apply_intraday_indicators(df)
                     r=df.iloc[-1]; p=df.iloc[-2]; p2=df.iloc[-3] if len(df)>=3 else p
-                    # NaN-safe conversion helpers — yFinance data sometimes has NaN!
                     def _si(v, d=0):
                         try:
                             x=float(v); return d if(np.isnan(x) or np.isinf(x)) else int(x)
@@ -1417,9 +1388,8 @@ with tab_scanner:
                             x=float(v); return d if(np.isnan(x) or np.isinf(x)) else x
                         except: return d
                     close=_sff(r.get("Close",0)); vol=_sff(r.get("Volume",0))
-                    if close<=0: skip_reasons["price0"]+=1; continue  # skip jika harga invalid
+                    if close<=0: skip_reasons["price0"]+=1; continue
                     ticker_raw=ticker_yf.upper()
-                    # FIX: gak boleh pakai `or` untuk DataFrame (ambiguous truth value)
                     df_d = daily_dict.get(ticker_yf)
                     if df_d is None: df_d = daily_dict.get(ticker_raw)
                     if df_d is not None and len(df_d)>=2:
@@ -1427,59 +1397,37 @@ with tab_scanner:
                         gain_pct=(c1-c0)/max(c0,1)*100
                         d_vol=float(df_d.iloc[-1]["Volume"])
                         if d_vol > 0:
-                            turnover=c1*d_vol  # daily volume normal
+                            turnover=c1*d_vol
                         else:
-                            # daily vol=0 (weekend/sebelum open) → 15m vol sum fallback
                             turnover=close*float(df["Volume"].fillna(0).sum())
                     else:
                         try:
-                            # Fallback: sum semua 15m volume (aman tanpa timezone issue)
                             turnover=close*float(df["Volume"].fillna(0).sum())
                             gain_pct=float(r.get("ROC3",0))*100
                         except:
                             turnover=close*max(vol,0); gain_pct=float(r.get("ROC3",0))*100
                     rvol_raw=float(r["RVOL"]) if not np.isnan(float(r["RVOL"])) else 1.0
-                    # RVOL kadang NaN/inf → fallback aman
                     if not np.isfinite(rvol_raw) or rvol_raw<=0:
                         rvol_raw=1.0
                     rvol=rvol_raw
-                    # threshold biaya/rvol
-                    # Turnover dulu (selalu pakai). RVOL bisa NaN/inf → fallback aman,
-                    # supaya screening tidak kosong.
-                    if turnover<min_turn:
+
+                    # ── LIQUIDITY TIER (NEW) ──
+                    tier=liq_tier(ticker_raw, turnover)
+
+                    # threshold biaya/rvol (floor)
+                    if turnover<min_turn or rvol<vol_thresh:
                         skip_reasons["turnover"]+=1
                         continue
-
-                    # RVOL NaN/inf/<=0 -> set default 1.0 (anggap netral)
-                    if not np.isfinite(rvol) or rvol<=0:
-                        rvol = 1.0
-
-                    # Pakai RVOL threshold kalau RVOL valid.
-                    if np.isfinite(rvol) and rvol < vol_thresh:
-                        skip_reasons["turnover"]+=1
+                    # ceiling check untuk mode Non-Liquid (NEW)
+                    if max_turn is not None and turnover>max_turn:
+                        skip_reasons["liq_ceiling"]+=1
                         continue
-
-                    # ceiling untuk turnover (khusus mode Non-Liquid)
-                    # NOTE: saat ini UI FILTER belum ada toggle Non-Liquid di file ini,
-                    # jadi max_turn belum tentu terdefinisi. Amankan dulu agar tidak crash.
-                    try:
-                        _mt = max_turn
-                    except NameError:
-                        _mt = None
-                    if _mt is not None and turnover>_mt:
-                        skip_reasons["turnover"]+=1
-                        continue
-
-
                     if scan_mode=="Scalping ⚡":   sc,reasons,_=score_scalping(r,p,p2)
-
                     elif scan_mode=="Momentum 🚀": sc,reasons,_=score_momentum(r,p,p2)
                     elif scan_mode=="Bagger 💎":   sc,reasons,_=score_bagger(r,p,p2,df)
                     else:                          sc,reasons,_=score_reversal(r,p,p2)
                     if sc<min_score: skip_reasons["score"]+=1; continue
                     sig=get_signal(sc,scan_mode)
-                    # NOTE: filter "if sig==WAIT continue" dihapus —
-                    # min_score slider yang jadi sole filter (jadi rata kiri = score 0+ all show)
                     sig_v2,sc_v2,flags_v2,gc_now=get_sinyal_v2(r,p,p2)
                     aksi_v2=get_aksi_v2(sig_v2,gc_now,sc_v2)
                     atr=float(r["ATR"]) if not np.isnan(float(r["ATR"])) else close*0.01
@@ -1504,8 +1452,7 @@ with tab_scanner:
                     lwick=_sf(r.get("LWick",0))
                     vb=turnover/1e9; val_str=f"{vb:.1f}B" if vb>=1 else f"{round(vb*1000,0):.0f}M"
 
-                    # ── IDX QUANT 151 STRATEGIES — daily analysis ──────────
-                    iq = iq_analyze(df_d)  # df_d already fetched above
+                    iq = iq_analyze(df_d)
                     mg, mg_col, ms = calc_mesin_grade(
                         sc, sig+"|"+sig_v2, iq["iq_score"], iq["iq_verdict"], iq["iq_bagger"])
 
@@ -1520,18 +1467,17 @@ with tab_scanner:
                         "VWAP":_si(r.get("VWAP",close),_si(close)),
                         "TP":tp,"SL":sl,"R:R":round(rr,1),
                         "Turnover(M)":round(turnover/1e6,1),"Val":val_str,
+                        "Liq_Tier":tier,
                         "Reasons":" · ".join(reasons),"_class":get_card_class(sig),
                         "LWick":round(lwick,1),"FDir":fdir,"FC":fc_,
                         "FNet3":_si(fnet3),"FNet8":_si(fnet8),"FRatio":round(fratio,2),
                         "sc_v2":sc_v2,"gc_now":gc_now,
-                        # ── IDX QUANT fields ──
                         "IQ_Score":round(iq["iq_score"],1),
                         "IQ_Verdict":iq["iq_verdict"],
                         "IQ_MA":iq["iq_ma"],
                         "IQ_Mom":iq["iq_mom"],
                         "IQ_Bagger":iq["iq_bagger"],
                         "IQ_RSI":iq["iq_rsi"],
-                        # ── MESIN PRESISI grade ──
                         "Mesin_Grade":mg,
                         "Mesin_Color":mg_col,
                         "Mesin_Score":round(ms,1),
@@ -1545,34 +1491,32 @@ with tab_scanner:
             st.session_state.last_scan_time=now_et.timestamp()
             _tt_save(results,st.session_state.last_scan_time)
             st.session_state.last_scan_mode=scan_mode
-            # Debug info kalau hasil kosong
             if not results:
                 n_data = len(data_dict)
                 st.warning(
                     f"⚠️ Scan selesai tapi 0 sinyal lolos dari {n_data} stocks yang di-fetch."
                 )
                 st.error(
-                    f"**🔧 Breakdown skip reasons:**\n"
-                    f"- Data terlalu pendek (<30 bars): **{skip_reasons['short']}**\n"
-                    f"- Harga invalid (Close ≤ 0): **{skip_reasons['price0']}**\n"
-                    f"- Turnover/RVOL di bawah threshold: **{skip_reasons['turnover']}**\n"
-                    f"- Score di bawah min_score: **{skip_reasons['score']}**\n"
-                    f"- Exception (crash): **{skip_reasons['error']}**\n\n"
-                    f"**Last error:** `{last_err[0] or 'none'}`\n\n"
-                    f"**Saran:** turunkan Min Score → 0, Min Turnover → 0, Min RVOL → 0 di sidebar."
+                    f"**🔧 Breakdown skip reasons:**\\n"
+                    f"- Data terlalu pendek (<30 bars): **{skip_reasons['short']}**\\n"
+                    f"- Harga invalid (Close ≤ 0): **{skip_reasons['price0']}**\\n"
+                    f"- Turnover/RVOL di bawah floor: **{skip_reasons['turnover']}**\\n"
+                    f"- Turnover di atas ceiling (Non-Liquid): **{skip_reasons['liq_ceiling']}**\\n"
+                    f"- Score di bawah min_score: **{skip_reasons['score']}**\\n"
+                    f"- Exception (crash): **{skip_reasons['error']}**\\n\\n"
+                    f"**Last error:** `{last_err[0] or 'none'}`\\n\\n"
+                    f"**Saran:** pilih mode **🌊 Semua**, atau turunkan Min Score → 0, Min Turnover → 0, Min RVOL → 0."
                 )
             else:
-                st.success(f"✅ {len(results)} sinyal ditemukan dari {len(data_dict)} stocks!")
+                st.success(f"✅ {len(results)} sinyal ditemukan dari {len(data_dict)} stocks! [Mode: {liq_mode}]")
             if tele_on and results:
                 if "tt_last_sent" not in st.session_state: st.session_state.tt_last_sent=set()
-                # Sort by Mesin_Score → kirim sinyal kualitas terbaik dulu
                 dft=pd.DataFrame(results).sort_values("Mesin_Score",ascending=False)
-                # Hanya kirim sinyal dengan Mesin Grade bermakna (skip WAIT/MARGINAL/LEMAH)
                 quality_mask=dft["Mesin_Grade"].astype(str).str.contains(
                     "PRESISI|SMART$|BAGGER|KUAT|MONITOR|TT-ONLY|WATCH", na=False)
                 dft_q=dft[quality_mask]
                 cs=set(dft_q["Ticker"].tolist())
-                na=cs-st.session_state.tt_last_sent  # new alerts only
+                na=cs-st.session_state.tt_last_sent
                 if na:
                     tn=dft_q[dft_q["Ticker"].isin(na)].head(8).to_dict("records")
                     if tn:
@@ -1620,6 +1564,8 @@ with tab_scanner:
         bagger =df_out[df_out["Signal"].str.contains("BAGGER|KANDIDAT",na=False)]
         potensi=df_out[df_out["Signal"].str.contains("POTENSIAL|REBOUND|AKUM",na=False)]
         avg_rsi=df_out["RSI-EMA"].mean()
+        liquid_cnt=len(df_out[df_out["Liq_Tier"]=="LIQUID"]) if "Liq_Tier" in df_out.columns else 0
+        nonliq_cnt=len(df_out[df_out["Liq_Tier"]=="NONLIQ"]) if "Liq_Tier" in df_out.columns else 0
         asing_b_list=df_out[df_out["FDir"]=="🔵 BELI"]["Ticker"].tolist() if "FDir" in df_out.columns else []
         asing_j_list=df_out[df_out["FDir"]=="🔴 JUAL"]["Ticker"].tolist() if "FDir" in df_out.columns else []
         bandar_list =df_out[df_out["Signal"].str.contains("SMART$",na=False)]["Ticker"].tolist() if "Signal" in df_out.columns else []
@@ -1636,8 +1582,9 @@ with tab_scanner:
           <div class="metric-card" style="border-top-color:{rcolor}"><div class="metric-label">Regime</div>
             <div class="metric-value" style="font-size:16px;color:{rcolor}">{regime}</div>
             <div class="metric-sub">{_pf(spx_price)} {chg_sym}{abs(spx_chg):.2f}%</div></div>
-          <div class="metric-card orange"><div class="metric-label">Mode</div>
-            <div class="metric-value" style="font-size:13px;margin-top:4px;">{lm}</div></div>
+          <div class="metric-card orange"><div class="metric-label">Mode · Liq</div>
+            <div class="metric-value" style="font-size:13px;margin-top:4px;">{lm}</div>
+            <div class="metric-sub">💧{liquid_cnt} · 🔥{nonliq_cnt}</div></div>
           <div class="metric-card green"><div class="metric-label">Signal Lolos</div>
             <div class="metric-value">{len(df_out)}</div><div class="metric-sub">dari {len(raw_stocks)} stocks</div></div>
           <div class="metric-card" style="border-top-color:#bf5fff"><div class="metric-label">BAGGER 💎</div>
@@ -1688,30 +1635,26 @@ with tab_scanner:
   </div>
 </div>""", unsafe_allow_html=True)
 
-        if DS_KEY:
-            bandar_str  = ", ".join(bandar_list[:5])   or "—"
-            asing_b_str = ", ".join(asing_b_list[:5])  or "—"
-            asing_j_str = ", ".join(asing_j_list[:5])  or "—"
-            st.markdown(f"""<div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap">
-  <div style="background:#0d1a2e;border:1px solid #4da6ff44;border-radius:8px;padding:8px 14px;flex:1;min-width:100px">
-    <div style="font-family:Space Mono,monospace;font-size:9px;color:#4da6ff;letter-spacing:1px">SMART$ MASUK</div>
-    <div style="font-family:Space Mono,monospace;font-size:18px;font-weight:700;color:#4da6ff">{bandar_cnt}</div>
-    <div style="font-size:9px;color:#4a5568">{bandar_str}</div>
+        # ── LIKUIDITAS BREAKDOWN (NEW) ──
+        liq_list   = df_out[df_out["Liq_Tier"]=="LIQUID"]["Ticker"].tolist() if "Liq_Tier" in df_out.columns else []
+        nonliq_lst = df_out[df_out["Liq_Tier"]=="NONLIQ"]["Ticker"].tolist() if "Liq_Tier" in df_out.columns else []
+        liq_str    = ", ".join(liq_list[:6])   or "—"
+        nonliq_str = ", ".join(nonliq_lst[:6]) or "—"
+        st.markdown(f"""<div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+  <div style="background:#0d1a2e;border:1px solid #4da6ff44;border-radius:8px;padding:8px 14px;flex:1;min-width:140px">
+    <div style="font-family:Space Mono,monospace;font-size:9px;color:#4da6ff;letter-spacing:1px">💧 LIQUID (Major)</div>
+    <div style="font-family:Space Mono,monospace;font-size:18px;font-weight:700;color:#4da6ff">{liquid_cnt}</div>
+    <div style="font-size:9px;color:#4a5568">{liq_str}</div>
   </div>
-  <div style="background:#0d2010;border:1px solid #00ff8844;border-radius:8px;padding:8px 14px;flex:1;min-width:100px">
-    <div style="font-family:Space Mono,monospace;font-size:9px;color:#00ff88;letter-spacing:1px">ASING NET BUY</div>
-    <div style="font-family:Space Mono,monospace;font-size:18px;font-weight:700;color:#00ff88">{asing_beli}</div>
-    <div style="font-size:9px;color:#4a5568">{asing_b_str}</div>
+  <div style="background:#1a0d05;border:1px solid #ff7b0044;border-radius:8px;padding:8px 14px;flex:1;min-width:140px">
+    <div style="font-family:Space Mono,monospace;font-size:9px;color:#ff7b00;letter-spacing:1px">🔥 NON-LIQUID (Microcap)</div>
+    <div style="font-family:Space Mono,monospace;font-size:18px;font-weight:700;color:#ff7b00">{nonliq_cnt}</div>
+    <div style="font-size:9px;color:#4a5568">{nonliq_str}</div>
   </div>
-  <div style="background:#200d0d;border:1px solid #ff3d5a44;border-radius:8px;padding:8px 14px;flex:1;min-width:100px">
-    <div style="font-family:Space Mono,monospace;font-size:9px;color:#ff3d5a;letter-spacing:1px">ASING NET SELL</div>
-    <div style="font-family:Space Mono,monospace;font-size:18px;font-weight:700;color:#ff3d5a">{asing_jual}</div>
-    <div style="font-size:9px;color:#4a5568">{asing_j_str}</div>
-  </div>
-  <div style="background:#0d1117;border:1px solid #1c2533;border-radius:8px;padding:8px 14px;flex:1;min-width:100px">
+  <div style="background:#0d1117;border:1px solid #1c2533;border-radius:8px;padding:8px 14px;flex:1;min-width:120px">
     <div style="font-family:Space Mono,monospace;font-size:9px;color:#4a5568;letter-spacing:1px">DATA SOURCE</div>
     <div style="font-family:Space Mono,monospace;font-size:14px;font-weight:700;color:#2dd4bf">yFinance Only</div>
-    <div style="font-size:9px;color:#4a5568">IDX yFinance OHLCV</div>
+    <div style="font-size:9px;color:#4a5568">Crypto OHLCV · 24/7</div>
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -1721,7 +1664,8 @@ with tab_scanner:
             mg2=str(row.get("Mesin_Grade","—"))
             cls="bagger" if ib else("up" if roc>0 else("down" if roc<0 else "flat"))
             sym="[BAG]" if "BAGGER" in mg2 else("[PRESISI]" if "PRESISI" in mg2 else("[SMART$]" if "SMART$" in mg2 else("[KUAT]" if "KUAT" in mg2 else("UP" if roc>0 else "DN"))))
-            th+=f'<span class="tape-item {cls}">{row["Ticker"]} {_pf(row["Price"])} {sym} IQ:{row.get("IQ_Verdict","?")}</span>'
+            liq_sym="💧" if row.get("Liq_Tier")=="LIQUID" else "🔥"
+            th+=f'<span class="tape-item {cls}">{liq_sym}{row["Ticker"]} {_pf(row["Price"])} {sym} IQ:{row.get("IQ_Verdict","?")}</span>'
         th+=th.replace('tape-inner">',''); th+='</div></div>'
         st.markdown(th, unsafe_allow_html=True)
 
@@ -1731,7 +1675,7 @@ with tab_scanner:
         if not bagger.empty:
             st.markdown(f'<div class="bagger-alert-box"><div class="bagger-title">WYCKOFF BAGGER x{len(bagger)} KANDIDAT</div></div>', unsafe_allow_html=True)
         if not gacor.empty:
-            st.markdown(f'<div class="alert-box"><div class="alert-title">GACOR ALERT x{len(gacor)} SAHAM — {lm}</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="alert-box"><div class="alert-title">GACOR ALERT x{len(gacor)} COIN — {lm}</div></div>', unsafe_allow_html=True)
 
         def tt_aksi_badge(a):
             a=str(a)
@@ -1754,7 +1698,6 @@ with tab_scanner:
 
         def mesin_badge(mg3):
             mg3=str(mg3)
-            # Order matters: cek yang lebih spesifik dulu
             M2={"PRESISI":("#00ff88","#0a1a10","rgba(0,255,136,.4)"),
                 "SMART$": ("#4da6ff","#0a1525","rgba(77,166,255,.4)"),
                 "BAGGER": ("#bf5fff","#150a25","rgba(191,95,255,.4)"),
@@ -1775,6 +1718,12 @@ with tab_scanner:
             c,bg,brd=M3.get(v,("#4a5568","rgba(255,255,255,.05)","rgba(255,255,255,.1)"))
             return f'<span style="background:{bg};color:{c};padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid {brd}">{v}</span>'
 
+        def liq_badge(tier):
+            tier=str(tier)
+            if tier=="LIQUID":
+                return '<span style="background:rgba(77,166,255,.12);color:#4da6ff;padding:2px 7px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid rgba(77,166,255,.35)">💧 LIQ</span>'
+            return '<span style="background:rgba(255,123,0,.12);color:#ff7b00;padding:2px 7px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid rgba(255,123,0,.35)">🔥 NON-LIQ</span>'
+
         if view_mode=="Card View 🃏":
             st.markdown('<div class="section-title">Signal Cards — sorted by Mesin Score</div>', unsafe_allow_html=True)
             ch='<div class="signal-grid">'
@@ -1789,6 +1738,7 @@ with tab_scanner:
                 ms_v=float(row.get("Mesin_Score",0))
                 iq_v=str(row.get("IQ_Verdict","—")); iq_s=float(row.get("IQ_Score",0))
                 iq_m=str(row.get("IQ_MA","—"))
+                tier_v=str(row.get("Liq_Tier","LIQUID"))
                 ch+=(f'<div class="signal-card {row["_class"]}">'
                      f'<div style="display:flex;justify-content:space-between;align-items:flex-start;">'
                      f'<div><div class="sc-ticker">{row["Ticker"]}</div>'
@@ -1797,7 +1747,7 @@ with tab_scanner:
                      f'<div style="font-family:Space Mono,monospace;font-size:9px;color:#4a5568">MESIN</div>'
                      f'<div style="font-family:Space Mono,monospace;font-size:18px;font-weight:700;color:{mg_c}">{ms_v:.0f}</div>'
                      f'</div></div>'
-                     f'<div style="margin:5px 0">{mesin_badge(mg_v)}</div>'
+                     f'<div style="margin:5px 0;display:flex;gap:5px;align-items:center;flex-wrap:wrap">{mesin_badge(mg_v)}{liq_badge(tier_v)}</div>'
                      f'<div class="sc-bars">{bars}</div>'
                      f'<div style="display:flex;gap:5px;margin:5px 0;flex-wrap:wrap">'
                      f'<div style="font-family:Space Mono,monospace;font-size:9px;padding:2px 7px;background:rgba(0,0,0,.3);border-radius:4px;color:#00e5ff">TT:{row["Signal"][:10]}</div>'
@@ -1807,7 +1757,7 @@ with tab_scanner:
                      f'<div class="sc-stats">'
                      f'<div class="sc-stat">RSI <span>{row["RSI-EMA"]}</span></div>'
                      f'<div class="sc-stat">RVOL <span>{row["RVOL"]}x</span></div>'
-                     f'<div class="sc-stat">ASING <span style="color:{fc}">{fd}</span></div>'
+                     f'<div class="sc-stat">TURN <span>{row.get("Turnover(M)",0):.0f}M</span></div>'
                      f'</div>'
                      f'<div class="sc-stats" style="margin-top:6px;">'
                      f'<div class="sc-stat">TP <span style="color:#00ff88">{_pf(row["TP"])}</span></div>'
@@ -1819,7 +1769,7 @@ with tab_scanner:
             ch+='</div>'; st.markdown(ch, unsafe_allow_html=True)
 
         st.markdown('<div class="section-title">Full Signal Table — MESIN PRESISI x 151 STRATEGIES</div>', unsafe_allow_html=True)
-        col_headers=["EMITEN","GRADE","MS","AKSI","SINYAL 15M","IQ DAILY","IQ SCORE","IQ MA","IQ BAG","RVOL","GAIN","NOW","TP","SL","PROFIT","RSI","TURNOVER","ASING"]
+        col_headers=["EMITEN","LIQ","GRADE","MS","AKSI","SINYAL 15M","IQ DAILY","IQ SCORE","IQ MA","IQ BAG","RVOL","GAIN","NOW","TP","SL","PROFIT","RSI","TURNOVER"]
         header_html="".join(f'<th style="padding:7px 6px;color:#4a5568;font-family:Space Mono,monospace;font-size:9px;letter-spacing:1px;border-bottom:2px solid #1c2533;white-space:nowrap">{h}</th>' for h in col_headers)
         rows_html=""
         for _,row in df_out.head(50).iterrows():
@@ -1828,7 +1778,6 @@ with tab_scanner:
             rsi_v=float(row.get("RSI-EMA",50))
             rsi_c="#00ff88" if rsi_v>60 else("#ff3d5a" if rsi_v<35 else("#ff7b00" if rsi_v<45 else "#4a5568"))
             rvol_s=f"{float(row.get('RVOL',1)):.1f}x"
-            fd=str(row.get("FDir","—")); fc=str(row.get("FC","#4a5568"))
             sv2=str(row.get("Sinyal_v2",row.get("Signal","-"))); av2=str(row.get("Aksi_v2","-"))
             tp_v=row.get("TP",0); sl_v=row.get("SL",0); price=row.get("Price",0)
             pp=(tp_v-price)/max(price,1)*100 if price>0 else 0
@@ -1839,8 +1788,10 @@ with tab_scanner:
             iq_m_color="#00ff88" if iq_m=="BULLISH" else("#ff3d5a" if iq_m=="BEARISH" else "#5a6478")
             iq_b_color="#bf5fff" if iq_b>=65 else "#4a5568"
             iq_b_star="*" if iq_b>=65 else ""
+            tier_v=str(row.get("Liq_Tier","LIQUID"))
             rows_html+=(f'<tr style="font-family:Space Mono,monospace;font-size:10px;">'
                 f'<td style="padding:5px 6px;font-weight:700;color:#e6edf3;text-align:left;border-bottom:1px solid #1c2533;white-space:nowrap">{row["Ticker"]}</td>'
+                f'<td style="padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center">{liq_badge(tier_v)}</td>'
                 f'<td style="padding:5px 6px;border-bottom:1px solid #1c2533;text-align:left">{mesin_badge(mg_v)}</td>'
                 f'<td style="padding:5px 6px;color:{mg_c2};font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{ms_v:.0f}</td>'
                 f'<td style="padding:5px 6px;border-bottom:1px solid #1c2533;text-align:center">{tt_aksi_badge(av2)}</td>'
@@ -1852,12 +1803,11 @@ with tab_scanner:
                 f'<td style="padding:5px 6px;color:#ff7b00;font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{rvol_s}</td>'
                 f'<td style="padding:5px 6px;color:{gc};font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{roc:+.1f}%</td>'
                 f'<td style="padding:5px 6px;color:#c9d1d9;border-bottom:1px solid #1c2533;text-align:center">{_pf(row["Price"])}</td>'
-                f'<td style="padding:5px 6px;background:#0d2b0d;color:#00ff88;font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{int(tp_v):,}</td>'
-                f'<td style="padding:5px 6px;background:#2b0d0d;color:#ff3d5a;border-bottom:1px solid #1c2533;text-align:center">{int(sl_v):,}</td>'
+                f'<td style="padding:5px 6px;background:#0d2b0d;color:#00ff88;font-weight:700;border-bottom:1px solid #1c2533;text-align:center">{_pf(tp_v)}</td>'
+                f'<td style="padding:5px 6px;background:#2b0d0d;color:#ff3d5a;border-bottom:1px solid #1c2533;text-align:center">{_pf(sl_v)}</td>'
                 f'<td style="padding:5px 6px;color:#00ff88;border-bottom:1px solid #1c2533;text-align:center">{pp:.1f}%</td>'
                 f'<td style="padding:5px 6px;color:{rsi_c};border-bottom:1px solid #1c2533;text-align:center">{rsi_v:.0f}</td>'
                 f'<td style="padding:5px 6px;color:#4a5568;font-size:9px;border-bottom:1px solid #1c2533;text-align:center">{row.get("Turnover(M)",0):.0f}M</td>'
-                f'<td style="padding:5px 6px;color:{fc};border-bottom:1px solid #1c2533;text-align:center;font-size:10px">{fd}</td>'
                 f'</tr>')
         st.markdown(
             f'<div style="overflow-x:auto;border-radius:8px;border:1px solid #1c2533;max-height:70vh;overflow-y:auto;">'
@@ -1866,16 +1816,16 @@ with tab_scanner:
             f'<tbody style="background:#0d1117">{rows_html}</tbody>'
             f'</table>'
             f'<div style="padding:6px 12px;background:#080c10;font-family:Space Mono,monospace;font-size:9px;color:#4a5568;border-top:1px solid #1c2533">'
-            f'Mesin Presisi CRYPTO v1.0 — TT 15M x IDX Quant Daily (151 Strategies) — Zero Rate Limit</div>'
+            f'Mesin Presisi CRYPTO v1.0 — TT 15M x Crypto Quant Daily (151 Strategies) — Zero Rate Limit · Liq: {liq_mode}</div>'
             f'</div>',
             unsafe_allow_html=True)
 
 # ════ TAB WATCHLIST ════
 with tab_watchlist:
-    st.markdown('<div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:12px;padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #ff7b00;">Analisa mendalam per stocks. Input ticker IDX (tanpa .JK).</div>',unsafe_allow_html=True)
+    st.markdown('<div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:12px;padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #ff7b00;">Analisa mendalam per coin. Input ticker crypto (format: BTC-USD, ETH-USD).</div>',unsafe_allow_html=True)
     wc1,wc2,wc3=st.columns([3,1,1])
     with wc1:
-        wl_input=st.text_area("Ticker",placeholder="Contoh:\nBBCA\nARCI, ASSA, GOTO",height=120,label_visibility="collapsed",key="wl_input")
+        wl_input=st.text_area("Ticker",placeholder="Contoh:\nBTC-USD\nETH-USD, SOL-USD, DOGE-USD",height=120,label_visibility="collapsed",key="wl_input")
     with wc2:
         wl_mode=st.radio("Mode",["Scalping ⚡","Momentum 🚀","Reversal 🎯","Bagger 💎"],key="wl_mode")
         st.caption(f"Regime suggest: {rcfg['mode']}")
@@ -1894,7 +1844,6 @@ with tab_watchlist:
                 try:
                     if DS_KEY: df=fetch_ds_ohlcv(t,"15m",200,wl_force)
                     if df is None:
-                        # yFinance fallback — Ticker().history(), no rate limit!
                         df=_fetch_yf_ticker(t,"7d","15m")
                 except: pass
                 if df is None or len(df)<30:
@@ -1917,8 +1866,8 @@ with tab_watchlist:
                         "Trend":trend,"RSI-EMA":round(float(r["RSI_EMA"]),1),
                         "Stoch K":round(float(r["STOCH_K"]),1),"RVOL":round(float(r["RVOL"]),2),
                         "BB%":round(float(r["BB_pct"]),2),"ROC 3B%":round(float(r["ROC3"])*100,2),
-                        "VWAP":int(float(r["VWAP"])),"TP":int(tp),"SL":int(sl),"R:R":round(rr,1),
-                        "ATR":round(atr,0),"MACD Hist":round(float(r["MACD_Hist"]),4),
+                        "VWAP":int(float(r["VWAP"])),"TP":tp,"SL":sl,"R:R":round(rr,1),
+                        "ATR":round(atr,2),"MACD Hist":round(float(r["MACD_Hist"]),4),
                         "Reasons":" · ".join(reasons),"_class":get_card_class(sig)})
                 except Exception as ex:
                     wl_res.append({"Ticker":t,"Price":0,"Score":0,"Signal":f"Err:{str(ex)[:20]}",
@@ -1970,15 +1919,13 @@ with tab_watchlist:
     elif not wl_run:
         st.markdown('<div style="text-align:center;padding:48px;color:#4a5568;font-family:Space Mono,monospace;"><div style="font-size:32px;margin-bottom:12px;">👁️</div><div>MASUKKAN TICKER DI ATAS</div></div>',unsafe_allow_html=True)
 
-# ════ TAB BSJP ════
+# ════ TAB BSJP / 24H PLAY ════
 with tab_bsjp:
     nw=datetime.now(et_tz)
-    iet=(nw.hour==14 and nw.minute>=30) or (nw.hour==15 and nw.minute<=45)
     st.markdown(f"""<div style="background:rgba(191,95,255,.08);border:1px solid rgba(191,95,255,.3);border-radius:8px;padding:14px 18px;margin-bottom:16px;">
-      <div style="font-family:Space Mono,monospace;font-size:13px;font-weight:700;color:#bf5fff;">🌙 BELI SORE JUAL PAGI</div>
+      <div style="font-family:Space Mono,monospace;font-size:13px;font-weight:700;color:#bf5fff;">🌙 24H SWING PLAY</div>
       <div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-top:4px;">
-        Entry: <span style="color:#ffb700">14:30–15:45 ET</span> · Exit: <span style="color:#00ff88">Besok 09:00–10:00 ET</span> ·
-        Status: <span style="color:{"#00ff88" if iet else "#4a5568"}>{"🟢 WAKTU ENTRY!" if iet else "⏳ Tunggu 14:30 ET"}</span>
+        Crypto market 24/7 — entry kapan saja · Cari setup momentum/akumulasi untuk hold beberapa jam–hari
       </div></div>""",unsafe_allow_html=True)
     bc1,bc2=st.columns([2,1])
     with bc1:
@@ -2010,7 +1957,7 @@ with tab_bsjp:
                 trend="▲ UP" if e9>e21>e50 else("▼ DOWN" if e9<e21<e50 else "◆ SIDE")
                 bsjp_res.append({"Ticker":stock_map.get(ty,ty),"Price":float(close),
                     "Score":sc,"Signal":bs,"Trend":trend,"RSI-EMA":round(float(r["RSI_EMA"]),1),
-                    "Stoch K":round(float(r["STOCH_K"]),1),"RVOL":round(rv,2),"TP":int(tp),"SL":int(sl),
+                    "Stoch K":round(float(r["STOCH_K"]),1),"RVOL":round(rv,2),"TP":tp,"SL":sl,
                     "R:R":round(rr,1),"Turnover(M)":round(to/1e6,1),"Reasons":" · ".join(reasons),
                     "_class":"gacor" if sc>=5 else "potensial" if sc>=4 else "watch"})
             except: continue
@@ -2044,8 +1991,8 @@ with tab_bsjp:
                 <div class="sc-stat">R:R <span>{row["R:R"]}</span></div>
               </div>
               <div class="sc-stats" style="margin-top:6px">
-                <div class="sc-stat">TP <span style="color:#00ff88">{row["TP"]:,}</span></div>
-                <div class="sc-stat">SL <span style="color:#ff3d5a">{row["SL"]:,}</span></div>
+                <div class="sc-stat">TP <span style="color:#00ff88">{_pf(row["TP"])}</span></div>
+                <div class="sc-stat">SL <span style="color:#ff3d5a">{_pf(row["SL"])}</span></div>
               </div>
               <div style="margin-top:4px;font-size:10px;color:#4a5568;font-family:Space Mono,monospace">{row["Reasons"][:70]}</div>
             </div>"""
@@ -2055,7 +2002,7 @@ with tab_bsjp:
 
 # ════ TAB SEKTOR ════
 with tab_sector:
-    st.markdown('<div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:14px;padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #ff7b00;">Track pergerakan tiap sektor IDX. ⚡ Hormuz: Energi, Shipping, Petrokimia</div>',unsafe_allow_html=True)
+    st.markdown('<div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:14px;padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #ff7b00;">Track rotasi sektor crypto. ⚡ High-beta: Memecoin, AI, Gaming, Solana eco</div>',unsafe_allow_html=True)
     do_sector=st.button("🏭 REFRESH SEKTOR",type="primary",use_container_width=True,key="btn_sector")
     if do_sector:
         sec_data={}
@@ -2088,7 +2035,7 @@ with tab_sector:
 
 # ════ TAB GAP UP ════
 with tab_gapup:
-    st.markdown('<div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:14px;padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #00ff88;">Deteksi stocks <b style="color:#00ff88">Gap Up besok</b> — via yFinance Ticker().history() parallel ✅</div>',unsafe_allow_html=True)
+    st.markdown('<div style="font-family:Space Mono,monospace;font-size:10px;color:#4a5568;margin-bottom:14px;padding:10px 14px;background:#0d1117;border-radius:6px;border-left:3px solid #00ff88;">Deteksi coin <b style="color:#00ff88">Gap Up besok</b> — via yFinance Ticker().history() parallel ✅</div>',unsafe_allow_html=True)
     gc1,gc2=st.columns(2)
     with gc1: gms=st.slider("Min Gap Score",1,6,3,key="gu_score")
     with gc2: gq=st.toggle("⚡ Quick Scan (200)",value=True,key="gu_quick")
@@ -2151,7 +2098,6 @@ with tab_trail:
             df_tr=None
             if DS_KEY: df_tr=fetch_ds_ohlcv(tr_t,"15m",200)
             if df_tr is None:
-                # yFinance fallback — Ticker().history(), no rate limit!
                 df_tr=_fetch_yf_ticker(tr_t,"7d","15m")
             if df_tr is not None and len(df_tr)>20:
                 df_tr2=apply_intraday_indicators(df_tr.copy())
@@ -2186,7 +2132,6 @@ with tab_trail:
 with tab_backtest:
     st.markdown('<div class="section-title">Backtest Engine · 15M Intraday</div>',unsafe_allow_html=True)
 
-    # --- New: precision-oriented backtest controls (fee+slippage, unbiased sampling) ---
     bt0a,bt0b = st.columns([2,1])
     with bt0a:
         bt_fee = st.number_input("Fee (bps per side)", value=5.0, step=1.0, min_value=0.0, max_value=100.0, key="bt_fee")
@@ -2207,7 +2152,6 @@ with tab_backtest:
         else:
             bt_r=[]; bpb=st.progress(0)
             sample_keys=list(dd.keys())
-            # unbiased sampling: shuffle with seed, then take 80
             rng=random.Random(int(bt_seed))
             rng.shuffle(sample_keys)
             sample=sample_keys[:80]
@@ -2228,14 +2172,12 @@ with tab_backtest:
                         if bt_mode=="Bagger 💎": tp2=en+3.0*av; sl2=en-1.0*av
                         else: tp2=en+2.0*av; sl2=en-bt_sl*av
                         ex=float(d.iloc[ii+bt_fwd]["Close"])
-                        # execution simulation: hit TP/SL using bar extremes, then apply fee+slippage
                         for fi in range(1,bt_fwd+1):
                             bar=d.iloc[ii+fi]
                             if float(bar["High"])>=tp2: ex=tp2; break
                             if float(bar["Low"])<=sl2:  ex=sl2; break
 
-                        # apply costs: fee bps per side + slippage bps (entry & exit)
-                        fee_rate = float(bt_fee) / 10000.0  # bps->rate (per side)
+                        fee_rate = float(bt_fee) / 10000.0
                         slip_rate = float(bt_slip) / 10000.0
                         entry_cost = 1.0 - fee_rate - slip_rate
                         exit_cost  = 1.0 - fee_rate - slip_rate
